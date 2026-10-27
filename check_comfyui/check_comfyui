@@ -4,9 +4,14 @@
 Read-only: GET ComfyUI /system_stats /queue /history, image API /status, MCP endpoint reachability; never generates images.
 ComfyUI and Strata are mutually exclusive on the GPU: ComfyUI stopped while Strata runs is OK.
 Perfdata keys are fixed across language and state.
-Version: 1.0
+Models: taken from the loader nodes of the running prompt, or of the last image when idle
+(ComfyUI has no API for what is resident in VRAM).
+Version: 1.1
 Author: Jason Cheng (Jason Tools) <jason@jason.tools>
 https://github.com/jasoncheng7115/jt-lnms-plugins
+
+1.0 (2026/10/25)  first release
+1.1 (2026/10/27)  show the models (main model, LoRA, text encoder, VAE) of the running prompt or the last image
 """
 import argparse
 import json
@@ -18,14 +23,44 @@ import urllib.error
 import urllib.request
 
 TEXT = {
- 'zh-tw': {'running':'執行中', 'standby':'未啟動（GPU 由 Strata 使用中）', 'bothdown':'ComfyUI 與 Strata 都未執行', 'apidown':'圖片 API 無法連線', 'mcpdown':'MCP 無法連線', 'invalid':'API 資料格式不正確', 'gpu':'GPU', 'vram':'整張 VRAM', 'torch':'ComfyUI 佔用', 'ram':'系統 RAM', 'queue':'執行中 / 排隊', 'last':'上一張圖', 'duration':'耗時', 'age':'距今', 'unavailable':'無資料', 'queue_limit':'排隊數 %d ≥ %d', 'api':'圖片 API (8189)', 'mcp':'MCP (8190)', 'up':'正常', 'down':'無法連線', 'strata':'Strata', 'on':'執行中', 'off':'停止', 'failed':'失敗'},
- 'en': {'running':'running', 'standby':'stopped (GPU in use by Strata)', 'bothdown':'neither ComfyUI nor Strata running', 'apidown':'image API unreachable', 'mcpdown':'MCP unreachable', 'invalid':'invalid API data', 'gpu':'GPU', 'vram':'whole VRAM', 'torch':'ComfyUI share', 'ram':'system RAM', 'queue':'running / queued', 'last':'last image', 'duration':'duration', 'age':'age', 'unavailable':'unavailable', 'queue_limit':'queued prompts %d >= %d', 'api':'image API (8189)', 'mcp':'MCP (8190)', 'up':'up', 'down':'down', 'strata':'Strata', 'on':'running', 'off':'stopped', 'failed':'failed'}
+ 'zh-tw': {'running':'執行中', 'standby':'未啟動（GPU 由 Strata 使用中）', 'bothdown':'ComfyUI 與 Strata 都未執行', 'apidown':'圖片 API 無法連線', 'mcpdown':'MCP 無法連線', 'invalid':'API 資料格式不正確', 'gpu':'GPU', 'vram':'整張 VRAM', 'torch':'ComfyUI 佔用', 'ram':'系統 RAM', 'queue':'執行中 / 排隊', 'last':'上一張圖', 'duration':'耗時', 'age':'距今', 'unavailable':'無資料', 'queue_limit':'排隊數 %d ≥ %d', 'api':'圖片 API (8189)', 'mcp':'MCP (8190)', 'up':'正常', 'down':'無法連線', 'strata':'Strata', 'on':'執行中', 'off':'停止', 'failed':'失敗', 'model':'模型', 'model_now':'目前產圖', 'model_last':'上一張圖', 'te':'文字編碼器', 'vae':'VAE', 'lora':'LoRA'},
+ 'en': {'running':'running', 'standby':'stopped (GPU in use by Strata)', 'bothdown':'neither ComfyUI nor Strata running', 'apidown':'image API unreachable', 'mcpdown':'MCP unreachable', 'invalid':'invalid API data', 'gpu':'GPU', 'vram':'whole VRAM', 'torch':'ComfyUI share', 'ram':'system RAM', 'queue':'running / queued', 'last':'last image', 'duration':'duration', 'age':'age', 'unavailable':'unavailable', 'queue_limit':'queued prompts %d >= %d', 'api':'image API (8189)', 'mcp':'MCP (8190)', 'up':'up', 'down':'down', 'strata':'Strata', 'on':'running', 'off':'stopped', 'failed':'failed', 'model':'model', 'model_now':'running prompt', 'model_last':'last image', 'te':'text encoder', 'vae':'VAE', 'lora':'LoRA'}
 }
 # U means unavailable, never a fabricated zero.
 PERF = ('running','strata','apiup','mcpup','gpuusedmib','gputotalmib','torchmib','ramusedgib','queuerunning','queued','lastseconds','lastagesec')
 
 def number(v):
  return isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v)
+
+MODEL_EXT=('.safetensors','.gguf','.ckpt','.sft','.pth','.pt','.bin')
+def short(name):
+ n=str(name).replace('\\','/').rsplit('/',1)[-1]
+ for e in MODEL_EXT:
+  if n.lower().endswith(e):return n[:-len(e)]
+ return n
+
+def models_of(graph):
+ # Loader node inputs in a prompt graph -> main models, LoRAs (with strength), text encoders, VAEs
+ main,loras,te,vae=[],[],[],[]
+ def add(l,v):
+  if v not in l:l.append(v)
+ for n in (graph or {}).values():
+  if not isinstance(n,dict):continue
+  ct=str(n.get('class_type') or '');ins=n.get('inputs') or {}
+  if 'Upscale' in ct or 'Vision' in ct:continue
+  for k,v in ins.items():
+   if not isinstance(v,str):continue
+   if k in ('ckpt_name','unet_name','model_name'):add(main,short(v))
+   elif k=='lora_name':
+    st=ins.get('strength_model',ins.get('strength'))
+    add(loras,short(v)+(' (%g)'%st if number(st) else ''))
+   elif k.startswith('clip_name'):add(te,short(v))
+   elif k=='vae_name':add(vae,short(v))
+ return main,loras,te,vae
+
+def graph_of(item):
+ # queue entries and history prompts are [number, prompt_id, graph, extra, outputs]
+ return item[2] if isinstance(item,(list,tuple)) and len(item)>2 and isinstance(item[2],dict) else None
 
 def main():
  p=argparse.ArgumentParser(description=__doc__)
@@ -93,9 +128,20 @@ def main():
   lines.append(t['vram']+': '+fmt(perf['gpuusedmib'])+' / '+fmt(perf['gputotalmib'])+' MiB · '+t['torch']+': '+fmt(perf['torchmib'])+' MiB')
   lines.append(t['ram']+': '+fmt(perf['ramusedgib'])+' / '+fmt(rt/2**30 if number(rt) else None)+' GiB')
   lines.append(t['queue']+': '+fmt(perf['queuerunning'],0)+' / '+fmt(perf['queued'],0))
+  try:h=get(a.port,'/history?max_items=1')
+  except (urllib.error.URLError,socket.timeout,TimeoutError,OSError,ValueError,TypeError):h=None
+  last=next(iter(h.values()),None) if h else None
+  graph,label=(graph_of(qr[0]),t['model_now']) if qr else (graph_of((last or {}).get('prompt')),t['model_last'])
+  main,loras,te,vae=models_of(graph)
+  if main or loras or te or vae:
+   summary+=' · '+', '.join(main or ['?'])
+   lines.append('')
+   lines.append(t['model']+' ('+label+'): '+(', '.join(main) or t['unavailable']))
+   extra=[x for x in ((t['te']+': '+', '.join(te)) if te else '',(t['vae']+': '+', '.join(vae)) if vae else '') if x]
+   if extra:lines.append(' · '.join(extra))
+   if loras:lines.append(t['lora']+': '+', '.join(loras))
   try:
-   h=get(a.port,'/history?max_items=1')
-   last=next(iter(h.values()),None) if h else None
+   if h is None:raise ValueError()
    msgs=((last or {}).get('status') or {}).get('messages') or []
    ts={m[0]:(m[1] or {}).get('timestamp') for m in msgs if isinstance(m,list) and len(m)==2}
    start,end=ts.get('execution_start'),ts.get('execution_success') or ts.get('execution_error')

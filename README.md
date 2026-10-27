@@ -23,7 +23,7 @@ A collection of self-developed LibreNMS / Nagios-compatible monitoring plugins. 
 | [check_webdiff](check_webdiff/) | v1.0 | LibreNMS server | Python 3 | Web page tampering: dynamic content removed, random parts filtered by fetching twice, external host tracking, expected/rejected text (replaces check_diff_webhtml) |
 | [check_ollama](check_ollama/) | v1.0 | LibreNMS server | Python 3 | Ollama loaded models, VRAM, unload countdown |
 | [check_strata](check_strata/) | v1.0 | LibreNMS server | Python 3 | Strata LLM inference API status, queue length, performance of the last request |
-| [check_comfyui](check_comfyui/) | v1.0 | LibreNMS server | Python 3 | ComfyUI status, VRAM, queue length, last image |
+| [check_comfyui](check_comfyui/) | v1.1 | LibreNMS server | Python 3 | ComfyUI status, models in use, VRAM, queue length, last image |
 | [check_pyhs](check_pyhs/) | v1.1 | LibreNMS server | Python 3 | Per-outlet power usage of a TP-Link Kasa 6-outlet smart power strip |
 
 check_graylog_*, check_pmg_queue, check_pve_cephosd, check_udp_nmap and check_diff_webhtml were originally hosted at https://github.com/jasoncheng7115/it-scripts/tree/master/nagios_plugons ; check_ext_ip from the same folder is replaced by the rewritten check_extip.

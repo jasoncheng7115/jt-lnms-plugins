@@ -23,7 +23,7 @@
 | [check_webdiff](check_webdiff/) | v1.0 | LibreNMS 主機 | Python 3 | 網頁竄改偵測：排除動態內容、連抓兩次濾掉亂數、外部主機追蹤、必須/不得出現的文字（取代 check_diff_webhtml） |
 | [check_ollama](check_ollama/) | v1.0 | LibreNMS 主機 | Python 3 | Ollama 已載入的模型、VRAM、卸載倒數 |
 | [check_strata](check_strata/) | v1.0 | LibreNMS 主機 | Python 3 | Strata LLM 推論 API 狀態、排隊數、上一筆請求效能 |
-| [check_comfyui](check_comfyui/) | v1.0 | LibreNMS 主機 | Python 3 | ComfyUI 狀態、VRAM、排隊數、上一張圖 |
+| [check_comfyui](check_comfyui/) | v1.1 | LibreNMS 主機 | Python 3 | ComfyUI 狀態、使用的模型、VRAM、排隊數、上一張圖 |
 | [check_pyhs](check_pyhs/) | v1.1 | LibreNMS 主機 | Python 3 | TP-Link Kasa 6 孔智慧延長線各插座用電 |
 
 check_graylog_*、check_pmg_queue、check_pve_cephosd、check_udp_nmap、check_diff_webhtml 原本放在 https://github.com/jasoncheng7115/it-scripts/tree/master/nagios_plugons ；同一處的 check_ext_ip 由重新撰寫的 check_extip 取代。

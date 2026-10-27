@@ -1,10 +1,11 @@
 [English](README.md) | 繁體中文
 
-# check_comfyui v1.0
+# check_comfyui v1.1
 
 檢查 ComfyUI（影像產生）的狀態。只讀 ComfyUI 的 `GET /system_stats`、`/queue`、`/history`，以及圖片 API 的 `/status` 與 MCP 端點是否可連線，不會產生圖片。
 
 - ComfyUI 版本、GPU 名稱、整張 VRAM 與 ComfyUI 佔用、系統 RAM
+- 使用的模型：主模型、LoRA（含強度）、文字編碼器、VAE。有工作在執行時取正在產圖的工作流程，閒置時取上一張圖的；ComfyUI 沒有 API 可以查詢目前常駐在 VRAM 的模型，所以畫面會標明是哪一種
 - 執行中/排隊數，排隊超過門檻告警
 - 上一張圖的耗時、距今時間、成功或失敗
 - 圖片 API（8189）、MCP（8190）是否正常
@@ -41,10 +42,28 @@ Check Type 選 `comfyui`：
 第一行是狀態摘要，接著是多行明細，最後一行是 `| ` 開頭的效能資料。欄位名稱固定，取不到的值輸出 `U`：
 
 ```text
-COMFYUI OK - 執行中 · ComfyUI 0.3.x
-（明細數行）
+COMFYUI OK - 執行中 · ComfyUI 0.42.0 · flux-2-klein-4b
+
+GPU: NVIDIA GeForce RTX 4060 Ti
+整張 VRAM: 4462.0 / 16030.9 MiB · ComfyUI 佔用: 8.7 MiB
+系統 RAM: 24.0 / 125.6 GiB
+執行中 / 排隊: 0 / 0
+
+模型 (上一張圖): flux-2-klein-4b
+文字編碼器: qwen_3_4b · VAE: flux2-vae
+
+上一張圖 (距今 319 s)
+耗時: 27.3 s
+
+圖片 API (8189): 正常 · MCP (8190): 正常
+Strata: 停止
 | running=1.000;;;0 strata=0.000;;;0 apiup=1.000;;;0 ... queued=0.000;3;10;0 ...
 ```
+
+## 版本紀錄
+
+- **v1.1**（2026/10/27）：顯示使用的模型（主模型、LoRA、文字編碼器、VAE），主模型也加在第一行
+- **v1.0**（2026/10/25）
 
 ## 作者
 

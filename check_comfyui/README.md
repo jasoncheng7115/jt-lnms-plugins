@@ -1,10 +1,11 @@
 English | [繁體中文](README_zh-TW.md)
 
-# check_comfyui v1.0
+# check_comfyui v1.1
 
 Checks the status of ComfyUI (image generation). It only reads ComfyUI's `GET /system_stats`, `/queue` and `/history`, and checks whether the image API `/status` and the MCP endpoint are reachable. It does not generate images.
 
 - ComfyUI version, GPU name, total VRAM and ComfyUI usage, system RAM
+- Models in use: main model, LoRAs (with strength), text encoders, VAE. Taken from the running prompt's workflow, or from the last image when idle; ComfyUI has no API for the models resident in VRAM, so the output says which one it is
 - Running/queued count, with an alert when the queue exceeds the threshold
 - Duration of the last image, time since it finished, success or failure
 - Whether the image API (8189) and MCP (8190) are working
@@ -41,10 +42,28 @@ Set Check Type to `comfyui`:
 The first line is the status summary, followed by multiple lines of detail; the last line is the perfdata, starting with `| `. Field names are fixed; values that cannot be retrieved are output as `U`:
 
 ```text
-COMFYUI OK - 執行中 · ComfyUI 0.3.x
-（明細數行）
+COMFYUI OK - running · ComfyUI 0.42.0 · flux-2-klein-4b
+
+GPU: NVIDIA GeForce RTX 4060 Ti
+whole VRAM: 4462.0 / 16030.9 MiB · ComfyUI share: 8.7 MiB
+system RAM: 24.0 / 125.6 GiB
+running / queued: 0 / 0
+
+model (last image): flux-2-klein-4b
+text encoder: qwen_3_4b · VAE: flux2-vae
+
+last image (age 319 s)
+duration: 27.3 s
+
+image API (8189): up · MCP (8190): up
+Strata: stopped
 | running=1.000;;;0 strata=0.000;;;0 apiup=1.000;;;0 ... queued=0.000;3;10;0 ...
 ```
+
+## Changelog
+
+- **v1.1** (2026/10/27): shows the models in use (main model, LoRAs, text encoders, VAE); the main model is also on the first line
+- **v1.0** (2026/10/25)
 
 ## Author
 
