@@ -1,0 +1,98 @@
+#!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# check_udp_nmap : UDP Port Checker (using nmap)
+#
+# Version: 1.1
+# Author: Jason Cheng
+# Web: https://github.com/jasoncheng7115/jt-lnms-plugins
+# Email: jason@jason.tools
+#
+# This script checks if a specific UDP port is open on a given IP address.
+#
+# nmap reports a UDP port as:
+#   open           the service replied
+#   open|filtered  no reply; normal for services that never answer an empty
+#                  probe (syslog, GELF, most custom listeners)
+#   closed         ICMP port unreachable came back: nothing is listening
+#   filtered       an ICMP error other than port unreachable
+# By default open and open|filtered are OK; -s (strict) accepts only open.
+# Messages never contain "|": LibreNMS treats everything after it as perfdata.
+#
+# 1.0         first release
+# 1.1 (2026/10/27)  report the real nmap state; open|filtered is no longer
+#                   matched by accident; -s strict mode; UNKNOWN on missing
+#                   options or nmap failure; host timeout
+
+# Declare variables
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+
+STRICT=0
+TIMEOUT=30
+
+usage() {
+    echo "Usage: $0 -H [IP] -p [port] [-s] [-t seconds]"
+    echo "  -s  strict: only 'open' is OK, 'open|filtered' is CRITICAL"
+    echo "  -t  nmap host timeout in seconds (default 30)"
+}
+
+# Parse command line options
+while getopts H:p:st:h option
+do
+    case "${option}"
+    in
+        H) IP=${OPTARG};;
+        p) PORT=${OPTARG};;
+        s) STRICT=1;;
+        t) TIMEOUT=${OPTARG};;
+        h) usage; exit $STATE_OK;;
+        *) usage; exit $STATE_UNKNOWN;;
+    esac
+done
+
+# Both host and port are required
+if [ -z "$IP" ] || ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
+    usage
+    exit $STATE_UNKNOWN
+fi
+
+# Check if /usr/bin/nmap exists
+if [ ! -x /usr/bin/nmap ]; then
+    echo "UNKNOWN: The nmap command does not exist. Please install nmap."
+    exit $STATE_UNKNOWN
+fi
+
+# Run the nmap command and store the result in a variable
+if ! NMAP_OUTPUT=$(sudo -n /usr/bin/nmap -sU -p "$PORT" -Pn --host-timeout "${TIMEOUT}s" "$IP" 2>&1); then
+    echo "UNKNOWN: nmap failed: $(echo "$NMAP_OUTPUT" | tail -n 1)"
+    exit $STATE_UNKNOWN
+fi
+
+# Second column of the "<port>/udp" line is the state
+STATE=$(echo "$NMAP_OUTPUT" | awk -v p="$PORT/udp" '$1 == p {print $2; exit}')
+
+case "$STATE" in
+    open)
+        echo "OK: $PORT/udp is listening."
+        exit $STATE_OK
+        ;;
+    open\|filtered)
+        if [ "$STRICT" -eq 1 ]; then
+            echo "CRITICAL: $PORT/udp did not reply (nmap: open/filtered)."
+            exit $STATE_CRITICAL
+        fi
+        echo "OK: $PORT/udp is listening or filtered (nmap: open/filtered, no reply)."
+        exit $STATE_OK
+        ;;
+    closed|filtered)
+        echo "CRITICAL: $PORT/udp is not listening ($STATE)."
+        exit $STATE_CRITICAL
+        ;;
+    *)
+        echo "UNKNOWN: No result for $PORT/udp on $IP (host down or timed out)."
+        exit $STATE_UNKNOWN
+        ;;
+esac

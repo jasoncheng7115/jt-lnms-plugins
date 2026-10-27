@@ -1,0 +1,8 @@
+#!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# check_ncpa_short v1.0 - check_ncpa wrapper: keep only the first line (status + perfdata).
+# Author: Jason Cheng (Jason Tools) <jason@jason.tools>
+# https://github.com/jasoncheng7115/jt-lnms-plugins
+# NCPA logs checks append long output after the perfdata, which LibreNMS would parse as performance data.
+/usr/lib/nagios/plugins/check_ncpa "$@" | head -n 1
+exit "${PIPESTATUS[0]}"

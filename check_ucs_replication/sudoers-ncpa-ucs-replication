@@ -1,0 +1,2 @@
+# NCPA（nagios）執行 UCS 複寫檢查時，讀取 Samba DRS 狀態用
+nagios ALL=(root) NOPASSWD: /usr/bin/samba-tool drs showrepl --json

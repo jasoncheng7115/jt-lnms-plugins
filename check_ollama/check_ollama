@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""
+check_ollama - LibreNMS/Nagios service check: models currently loaded in Ollama
+
+Language: -l zh-tw|en (default zh-tw).
+
+Reports every model resident in memory with its footprint, VRAM share, and the
+countdown until Ollama unloads it. Ollama can hold several models at once, so
+all of them are listed.
+
+Version: 1.0
+Author: Jason Cheng (Jason Tools) <jason@jason.tools>
+https://github.com/jasoncheng7115/jt-lnms-plugins
+License: AGPL-3.0-or-later
+
+LibreNMS invokes this as:
+    <nagios_plugins>/check_ollama -H <service_ip|hostname> <service_param>
+
+Output layout is dictated by LibreNMS's parser (includes/services.inc.php):
+it joins every stdout line with "\n" and then splits on the FIRST "|", so all
+human-readable detail must precede the perfdata block, which is emitted last.
+
+Usage:
+    check_ollama -H 192.168.1.40 [-p 11434] [-l zh-tw|en] [-w GB] [-c GB]
+                 [--min-models N] [--expiring SECONDS] [-t 10]
+
+Thresholds (all optional):
+    -w / -c         total VRAM in GB
+    --min-models    WARNING when fewer than N models are resident, which
+                    catches a model that got evicted when it should stay warm
+    --expiring      WARNING when a model unloads within N seconds
+
+Exit: 0 OK / 1 WARNING / 2 CRITICAL / 3 UNKNOWN
+"""
+
+import argparse
+import json
+import socket
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+OK, WARNING, CRITICAL, UNKNOWN = 0, 1, 2, 3
+STATE = {OK: 'OK', WARNING: 'WARNING', CRITICAL: 'CRITICAL', UNKNOWN: 'UNKNOWN'}
+
+LANG = 'zh-tw'
+TRANSLATIONS = {
+ '常駐不卸載': 'kept loaded', '卸載中': 'unloading', '後卸載': 'until unload',
+ '無法連線': 'cannot connect', '回傳非 JSON': 'returned non-JSON data',
+ '僅 %d 個模型載入（期望 >= %d）': 'only %d models loaded (expected >= %d)',
+ '%s 將於 %s 後卸載': '%s unloads in %s',
+ '僅 %.0f%% 在 GPU': 'only %.0f%% on GPU',
+ '%d 個模型 · VRAM %.2f GB': '%d models · VRAM %.2f GB',
+ '目前沒有載入任何模型': 'no models currently loaded',
+}
+def tr(text):
+    return TRANSLATIONS.get(text, text) if LANG == 'en' else text
+
+GB = 1024 ** 3  # VRAM is conventionally reported in binary units
+
+
+def api_get(base, path, timeout, token=None):
+    req = urllib.request.Request(base + path, headers={'Accept': 'application/json'})
+    if token:
+        req.add_header('Authorization', 'Bearer ' + token)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode('utf-8'))
+
+
+def parse_expiry(value):
+    """Seconds until unload, or None when the model never expires.
+
+    Ollama stamps keep_alive=-1 models with year 0001, and emits nanosecond
+    precision that datetime cannot parse, so the fraction is trimmed to micro.
+    """
+    if not value or value.startswith('0001-'):
+        return None
+    v = value.replace('Z', '+00:00')
+    if '.' in v:
+        head, _, tail = v.partition('.')
+        digits = ''
+        for ch in tail:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        v = head + '.' + digits[:6] + tail[len(digits):]
+    try:
+        dt = datetime.fromisoformat(v)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (dt - datetime.now(timezone.utc)).total_seconds()
+
+
+def human_duration(seconds):
+    if seconds is None:
+        return tr('常駐不卸載')
+    if seconds <= 0:
+        return tr('卸載中')
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return '%dh%02dm' % (h, m)
+    if m:
+        return '%dm%02ds' % (m, sec)
+    return '%ds' % sec
+
+
+def human_count(n):
+    """262144 -> 262K, so long context values stay readable inline."""
+    if n >= 1000000:
+        return '%.1fM' % (n / 1000000.0)
+    if n >= 1000:
+        return '%dK' % (n // 1000)
+    return str(n)
+
+
+def main():
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument('-H', '--host', required=True)
+    p.add_argument('-p', '--port', type=int, default=11434)
+    p.add_argument('-t', '--timeout', type=float, default=10.0)
+    p.add_argument('-w', '--warning', type=float, metavar='GB')
+    p.add_argument('-c', '--critical', type=float, metavar='GB')
+    p.add_argument('--min-models', type=int, metavar='N')
+    p.add_argument('--expiring', type=int, metavar='SECONDS')
+    p.add_argument('--ssl', action='store_true')
+    p.add_argument('--api-key')
+    p.add_argument('-h', '--help', action='help')
+    p.add_argument('-l', '--language', choices=['zh-tw', 'en'], default='zh-tw')
+    args = p.parse_args()
+    global LANG
+    LANG = args.language
+
+    base = '%s://%s:%d' % ('https' if args.ssl else 'http', args.host, args.port)
+    socket.setdefaulttimeout(args.timeout)
+
+    try:
+        data = api_get(base, '/api/ps', args.timeout, args.api_key)
+    except urllib.error.HTTPError as e:
+        print('OLLAMA CRITICAL - HTTP %s from %s/api/ps' % (e.code, base))
+        return CRITICAL
+    except (urllib.error.URLError, socket.timeout, OSError) as e:
+        print('OLLAMA CRITICAL - %s %s (%s)' % (tr('無法連線'), base, getattr(e, 'reason', e)))
+        return CRITICAL
+    except json.JSONDecodeError:
+        print('OLLAMA UNKNOWN - %s/api/ps %s' % (base, tr('回傳非 JSON')))
+        return UNKNOWN
+
+    version = ''
+    try:
+        version = api_get(base, '/api/version', args.timeout, args.api_key).get('version', '')
+    except Exception:
+        pass  # informational only, never fail the check on this
+
+    models = data.get('models') or []
+    total_size = sum(m.get('size') or 0 for m in models)
+    total_vram = sum(m.get('size_vram') or 0 for m in models)
+    vram_gb = total_vram / GB
+
+    code = OK
+    notes = []
+
+    if args.critical is not None and vram_gb >= args.critical:
+        code = CRITICAL
+        notes.append('VRAM %.2f GB >= %g' % (vram_gb, args.critical))
+    elif args.warning is not None and vram_gb >= args.warning:
+        code = WARNING
+        notes.append('VRAM %.2f GB >= %g' % (vram_gb, args.warning))
+
+    if args.min_models is not None and len(models) < args.min_models:
+        code = max(code, WARNING)
+        notes.append(tr('僅 %d 個模型載入（期望 >= %d）') % (len(models), args.min_models))
+
+    # LibreNMS shows this in a narrow table column (~42 chars) and renders it
+    # with nl2br(htmlentities(...)) - newlines survive, runs of spaces do not.
+    # So: no padded alignment, and every line kept short enough that the column
+    # never has to wrap it mid-field.
+    lines = []
+    for m in sorted(models, key=lambda x: -(x.get('size_vram') or 0)):
+        det = m.get('details') or {}
+        size = m.get('size') or 0
+        vram = m.get('size_vram') or 0
+        left = parse_expiry(m.get('expires_at'))
+
+        if args.expiring is not None and left is not None and 0 < left <= args.expiring:
+            code = max(code, WARNING)
+            notes.append(tr('%s 將於 %s 後卸載') % (m.get('name'), human_duration(left)))
+
+        lines.append('')
+        lines.append(m.get('name', '?'))
+
+        spec = ['%.2f GB' % (vram / GB)]
+        # A gap between the two means part of the model spilled to system RAM
+        if size and vram < size:
+            spec.append(tr('僅 %.0f%% 在 GPU') % (vram / size * 100))
+        spec += [x for x in (det.get('parameter_size'),
+                             det.get('quantization_level')) if x]
+        lines.append(' · '.join(spec))
+
+        tail = []
+        if m.get('context_length'):
+            tail.append('ctx ' + human_count(m['context_length']))
+        tail.append(human_duration(left) if left is None
+                    else human_duration(left) + ' ' + tr('後卸載'))
+        lines.append(' · '.join(tail))
+
+    if models:
+        summary = tr('%d 個模型 · VRAM %.2f GB') % (len(models), vram_gb)
+    else:
+        summary = tr('目前沒有載入任何模型')
+    if notes:
+        summary += ' - ' + '; '.join(notes)
+
+    print('OLLAMA %s - %s' % (STATE[code], summary))
+    for line in lines:
+        print(line)
+    if version:
+        print('')
+        print('ollama %s' % version)
+
+    # Perfdata goes LAST: LibreNMS splits the whole joined output on the first
+    # "|", so anything after it is treated as metrics. DS names are fixed rather
+    # than per-model - LibreNMS locks the RRD's DS set on the first poll, so a
+    # DS named after a model would break as soon as the loaded set changes.
+    # It also strips non-alphanumerics and truncates to 19 chars, which would
+    # collide (e.g. "qwen3-vl:2b" -> "qwen3vl2b").
+    perf = [
+        'models=%d;%s;;0' % (len(models), args.min_models if args.min_models else ''),
+        'vram=%.3fGB;%s;%s;0' % (vram_gb,
+                                 args.warning if args.warning is not None else '',
+                                 args.critical if args.critical is not None else ''),
+        'size=%.3fGB;;;0' % (total_size / GB),
+    ]
+    print('| ' + ' '.join(perf))
+    return code
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as e:  # never let a traceback reach the monitoring system
+        print('OLLAMA UNKNOWN - %s: %s' % (type(e).__name__, e))
+        sys.exit(UNKNOWN)

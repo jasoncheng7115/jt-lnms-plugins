@@ -1,0 +1,76 @@
+#!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Check Graylog for Index Failure errors in the last five minutes.
+# v1.2
+#
+# https://github.com/jasoncheng7115/jt-lnms-plugins
+# https://blog.jason.tools
+#
+# jason@jason.tools
+# 2023/12/15  v1.1
+# 2026/10/27  v1.2  CRITICAL on any failure count > 0 (was only == 1);
+#                   UNKNOWN when the API cannot be reached; perfdata thresholds
+
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+
+usage() {
+    echo "Usage: $0 -U USER -P PASSWORD -p PORT -H IP [-S] [-h]"
+    echo
+    echo "  -U USER        The username for authentication"
+    echo "  -P PASSWORD    The password for authentication"
+    echo "  -p PORT        The port number"
+    echo "  -H IP/FQDN     The IP or FQDN"
+    echo "  -S             Use https protocol (optional)"
+    echo "  -h             Display this help message"
+    exit $STATE_UNKNOWN
+}
+
+
+if [ $# -eq 0 ]; then
+    usage
+fi
+
+while getopts U:P:p:H:Sh option
+do
+ case "${option}"
+ in
+ U) USER=${OPTARG};;
+ P) PASSWORD=${OPTARG};;
+ p) PORT=${OPTARG};;
+ H) IP=${OPTARG};;
+ S) SECURE=1;;
+ h) usage;;
+ *) usage;;
+ esac
+done
+
+if [ -z "$IP" ] || [ -z "$PORT" ]; then
+    usage
+fi
+
+if [ "$SECURE" ]; then
+    PROTOCOL="https"
+else
+    PROTOCOL="http"
+fi
+
+
+RESULT=`curl --silent --max-time 30 -u "$USER:${PASSWORD//\!/\\!}" -H "Accept: application/json" -X GET "$PROTOCOL://$IP:$PORT/api/system/indexer/failures/count?since=$(date -u +'%FT%T.%2NZ' -d " -5 minute")&pretty=true" -k | grep count | awk -F":" '{print $2}' | tr -d ' ,'`
+
+# Empty or non-numeric means the API call failed (unreachable, 401, unexpected reply)
+if ! [[ "$RESULT" =~ ^[0-9]+$ ]]; then
+    echo "UNKNOWN: Cannot get index failure count from $PROTOCOL://$IP:$PORT"
+    exit $STATE_UNKNOWN
+fi
+
+if [ "$RESULT" -gt 0 ]; then
+    echo "CRITICAL: Index failure occurred ($RESULT records in the last 5 minutes)|'index_failure'=$RESULT;;1;0"
+    exit $STATE_CRITICAL
+fi
+
+echo "OK: No index failure.|'index_failure'=$RESULT;;1;0"
+exit $STATE_OK

@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""LibreNMS/Nagios ComfyUI check. -l zh-tw|en; default zh-tw. -w/-c: queued prompts (default 3/10), inclusive thresholds.
+Read-only: GET ComfyUI /system_stats /queue /history, image API /status, MCP endpoint reachability; never generates images.
+ComfyUI and Strata are mutually exclusive on the GPU: ComfyUI stopped while Strata runs is OK.
+Perfdata keys are fixed across language and state.
+Version: 1.0
+Author: Jason Cheng (Jason Tools) <jason@jason.tools>
+https://github.com/jasoncheng7115/jt-lnms-plugins
+"""
+import argparse
+import json
+import math
+import socket
+import sys
+import time
+import urllib.error
+import urllib.request
+
+TEXT = {
+ 'zh-tw': {'running':'執行中', 'standby':'未啟動（GPU 由 Strata 使用中）', 'bothdown':'ComfyUI 與 Strata 都未執行', 'apidown':'圖片 API 無法連線', 'mcpdown':'MCP 無法連線', 'invalid':'API 資料格式不正確', 'gpu':'GPU', 'vram':'整張 VRAM', 'torch':'ComfyUI 佔用', 'ram':'系統 RAM', 'queue':'執行中 / 排隊', 'last':'上一張圖', 'duration':'耗時', 'age':'距今', 'unavailable':'無資料', 'queue_limit':'排隊數 %d ≥ %d', 'api':'圖片 API (8189)', 'mcp':'MCP (8190)', 'up':'正常', 'down':'無法連線', 'strata':'Strata', 'on':'執行中', 'off':'停止', 'failed':'失敗'},
+ 'en': {'running':'running', 'standby':'stopped (GPU in use by Strata)', 'bothdown':'neither ComfyUI nor Strata running', 'apidown':'image API unreachable', 'mcpdown':'MCP unreachable', 'invalid':'invalid API data', 'gpu':'GPU', 'vram':'whole VRAM', 'torch':'ComfyUI share', 'ram':'system RAM', 'queue':'running / queued', 'last':'last image', 'duration':'duration', 'age':'age', 'unavailable':'unavailable', 'queue_limit':'queued prompts %d >= %d', 'api':'image API (8189)', 'mcp':'MCP (8190)', 'up':'up', 'down':'down', 'strata':'Strata', 'on':'running', 'off':'stopped', 'failed':'failed'}
+}
+# U means unavailable, never a fabricated zero.
+PERF = ('running','strata','apiup','mcpup','gpuusedmib','gputotalmib','torchmib','ramusedgib','queuerunning','queued','lastseconds','lastagesec')
+
+def number(v):
+ return isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v)
+
+def main():
+ p=argparse.ArgumentParser(description=__doc__)
+ p.add_argument('-H','--host',required=True);p.add_argument('-p','--port',type=int,default=8188)
+ p.add_argument('--api-port',type=int,default=8189);p.add_argument('--mcp-port',type=int,default=8190)
+ p.add_argument('-t','--timeout',type=float,default=8);p.add_argument('-l','--language',choices=['zh-tw','en'],default='zh-tw')
+ p.add_argument('-w','--warning',type=int,default=3,help='WARNING when queued prompts >= N (default: 3)')
+ p.add_argument('-c','--critical',type=int,default=10,help='CRITICAL when queued prompts >= N (default: 10)')
+ a=p.parse_args()
+ if a.warning<1 or a.critical<=a.warning:p.error('require 1 <= warning < critical')
+ t=TEXT[a.language];perf=dict.fromkeys(PERF);lines=[]
+ def emit(code,summary):
+  print('COMFYUI '+{0:'OK',1:'WARNING',2:'CRITICAL',3:'UNKNOWN'}[code]+' - '+summary.replace('|','/'))
+  for line in lines:print(str(line).replace('|','/').replace('\r',' '))
+  print('| '+' '.join(k+'='+('%.3f'%perf[k] if number(perf[k]) else 'U')+(f';{a.warning};{a.critical};0' if k=='queued' else ';;;0') for k in PERF))
+  return code
+ deadline=time.monotonic()+a.timeout
+ def get(port,path):
+  remaining=deadline-time.monotonic()
+  if remaining<=0:raise TimeoutError()
+  req=urllib.request.Request('http://'+a.host+':'+str(port)+path,headers={'Accept':'application/json'})
+  with urllib.request.urlopen(req,timeout=remaining) as r:
+   raw=r.read(4*1024*1024+1)
+   if len(raw)>4*1024*1024:raise ValueError()
+   d=json.loads(raw)
+   if not isinstance(d,dict):raise ValueError()
+   return d
+ def reachable(port,path):
+  # any HTTP response (even 4xx) means the server is up
+  try:get(port,path);return True
+  except urllib.error.HTTPError:return True
+  except (ValueError,TypeError):return True
+  except (urllib.error.URLError,socket.timeout,TimeoutError,OSError):return False
+ def fmt(v,places=1):return ('%.*f'%(places,v)) if number(v) else t['unavailable']
+ problems=[]
+ try:
+  st=get(a.api_port,'/status');perf['apiup']=1
+  strata=st.get('strata') is True;perf['strata']=int(strata)
+ except (urllib.error.URLError,socket.timeout,TimeoutError,OSError,ValueError,TypeError):
+  perf['apiup']=0;strata=None;problems.append(t['apidown'])
+ perf['mcpup']=int(reachable(a.mcp_port,'/mcp'))
+ if not perf['mcpup']:problems.append(t['mcpdown'])
+ try:
+  ss=get(a.port,'/system_stats');q=get(a.port,'/queue');running=True
+ except urllib.error.HTTPError:return emit(3,t['invalid'])
+ except (urllib.error.URLError,socket.timeout,TimeoutError,OSError):running=False
+ except (ValueError,TypeError):return emit(3,t['invalid'])
+ perf['running']=int(running)
+ code=0
+ if running:
+  dev=(ss.get('devices') or [{}])[0];sysd=ss.get('system') or {}
+  vt,vf=dev.get('vram_total'),dev.get('vram_free');tt,tf=dev.get('torch_vram_total'),dev.get('torch_vram_free')
+  if number(vt) and number(vf):perf.update(gpuusedmib=(vt-vf)/2**20,gputotalmib=vt/2**20)
+  if number(tt) and number(tf):perf['torchmib']=(tt-tf)/2**20
+  rt,rf=sysd.get('ram_total'),sysd.get('ram_free')
+  if number(rt) and number(rf):perf['ramusedgib']=(rt-rf)/2**30
+  qr,qp=q.get('queue_running'),q.get('queue_pending')
+  if not isinstance(qr,list) or not isinstance(qp,list):return emit(3,t['invalid'])
+  perf.update(queuerunning=len(qr),queued=len(qp))
+  code=2 if len(qp)>=a.critical else 1 if len(qp)>=a.warning else 0
+  summary=t['running']+' · ComfyUI '+str(sysd.get('comfyui_version') or '?')
+  if code:summary+=' · '+t['queue_limit']%(len(qp),a.critical if code==2 else a.warning)
+  lines.append('')
+  lines.append(t['gpu']+': '+str(dev.get('name') or '?').split(' : ')[0].split(' ',1)[-1])
+  lines.append(t['vram']+': '+fmt(perf['gpuusedmib'])+' / '+fmt(perf['gputotalmib'])+' MiB · '+t['torch']+': '+fmt(perf['torchmib'])+' MiB')
+  lines.append(t['ram']+': '+fmt(perf['ramusedgib'])+' / '+fmt(rt/2**30 if number(rt) else None)+' GiB')
+  lines.append(t['queue']+': '+fmt(perf['queuerunning'],0)+' / '+fmt(perf['queued'],0))
+  try:
+   h=get(a.port,'/history?max_items=1')
+   last=next(iter(h.values()),None) if h else None
+   msgs=((last or {}).get('status') or {}).get('messages') or []
+   ts={m[0]:(m[1] or {}).get('timestamp') for m in msgs if isinstance(m,list) and len(m)==2}
+   start,end=ts.get('execution_start'),ts.get('execution_success') or ts.get('execution_error')
+   if number(start) and number(end):
+    perf.update(lastseconds=(end-start)/1000,lastagesec=max(0,time.time()-end/1000))
+    ok='execution_success' in ts
+    lines.extend(['',t['last']+' ('+t['age']+' '+fmt(perf['lastagesec'],0)+' s)'+('' if ok else ' · '+t['failed']),t['duration']+': '+fmt(perf['lastseconds'])+' s'])
+   else:lines.extend(['',t['last']+': '+t['unavailable']])
+  except (urllib.error.URLError,socket.timeout,TimeoutError,OSError,ValueError,TypeError,StopIteration):
+   lines.extend(['',t['last']+': '+t['unavailable']])
+ elif strata:
+  summary=t['standby']
+ else:
+  summary=t['bothdown'] if strata is False else t['standby'].split('（')[0].split(' (')[0]
+  code=1
+ if problems:
+  code=max(code,1);summary+=' · '+' · '.join(problems)
+ lines.extend(['',t['api']+': '+(t['up'] if perf['apiup'] else t['down'])+' · '+t['mcp']+': '+(t['up'] if perf['mcpup'] else t['down']),t['strata']+': '+(t['unavailable'] if strata is None else t['on'] if strata else t['off'])])
+ return emit(code,summary)
+
+if __name__=='__main__':
+ try:sys.exit(main())
+ except Exception as e:
+  print('COMFYUI UNKNOWN - '+type(e).__name__);sys.exit(3)

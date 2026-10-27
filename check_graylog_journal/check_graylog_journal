@@ -1,0 +1,116 @@
+#!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Check Graylog for Journal Usage.
+# v1.1
+#
+# https://github.com/jasoncheng7115/jt-lnms-plugins
+# https://blog.jason.tools
+#
+# jason@jason.tools
+# 2023/12/22  v1.0
+# 2026/10/27  v1.1  -c is required; UNKNOWN when the API cannot be reached or
+#                   returns no journal size; perfdata thresholds and range
+
+
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+
+usage() {
+    echo "Usage: $0 -U USER -P PASSWORD -p PORT -H IP -c THRESHOLD [-S] [-h]"
+    echo
+    echo "  -U USER        The username for authentication"
+    echo "  -P PASSWORD    The password for authentication"
+    echo "  -p PORT        The port number"
+    echo "  -H IP/FQDN     The IP or FQDN"
+    echo "  -c THRESHOLD   Threshold for usage percentage"
+    echo "  -S             Use https protocol (optional)"
+    echo "  -h             Display this help message"
+    exit $STATE_UNKNOWN
+}
+
+
+if [ $# -eq 0 ]; then
+    usage
+fi
+
+while getopts U:P:p:H:c:Sh option
+do
+ case "${option}"
+ in
+ U) USER=${OPTARG};;
+ P) PASSWORD=${OPTARG};;
+ p) PORT=${OPTARG};;
+ H) IP=${OPTARG};;
+ c) THRESHOLD=${OPTARG};;
+ S) SECURE=1;;
+ h) usage;;
+ *) usage;;
+ esac
+done
+
+if [ -z "$IP" ] || [ -z "$PORT" ]; then
+    usage
+fi
+
+if ! [[ "$THRESHOLD" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "UNKNOWN: -c THRESHOLD is required and must be a number"
+    exit $STATE_UNKNOWN
+fi
+
+if [ "$SECURE" ]; then
+    PROTOCOL="https"
+else
+    PROTOCOL="http"
+fi
+
+RESULT=`curl --silent --max-time 30 -u "$USER:${PASSWORD//\!/\\!}" -H "Accept: application/json" -X GET "$PROTOCOL://$IP:$PORT/api/system/journal?pretty=true" -k`
+
+
+# Use grep to find lines containing "journal_size" and "journal_size_limit", then use awk to process
+journal_size_line=$(echo "$RESULT" | grep '"journal_size"')
+journal_size=$(echo $journal_size_line | awk -F: '{print $2}' | awk -F, '{print $1}' | tr -d ' ')
+
+journal_size_limit_line=$(echo "$RESULT" | grep '"journal_size_limit"')
+journal_size_limit=$(echo $journal_size_limit_line | awk -F: '{print $2}' | awk -F, '{print $1}' | tr -d ' ')
+
+if ! [[ "$journal_size" =~ ^[0-9]+$ ]] || ! [[ "$journal_size_limit" =~ ^[0-9]+$ ]] || [ "$journal_size_limit" -eq 0 ]; then
+    echo "UNKNOWN: Cannot get journal size from $PROTOCOL://$IP:$PORT"
+    exit $STATE_UNKNOWN
+fi
+
+# Calculate usage percentage
+usage_percentage=$(LC_ALL=C printf '%.2f' "$(echo "scale=4; $journal_size * 100 / $journal_size_limit" | bc)")
+
+# Convert journal_size and journal_size_limit to GB or MB
+if ((journal_size>=1073741824)); then
+    journal_size=$(echo "scale=2; $journal_size / 1073741824" | bc)
+    journal_size="${journal_size}GB"
+elif ((journal_size>=1048576)); then
+    journal_size=$(echo "scale=2; $journal_size / 1048576" | bc)
+    journal_size="${journal_size}MB"
+else
+    journal_size="${journal_size}B"
+fi
+
+if ((journal_size_limit>=1073741824)); then
+    journal_size_limit=$(echo "scale=2; $journal_size_limit / 1073741824" | bc)
+    journal_size_limit="${journal_size_limit}GB"
+elif ((journal_size_limit>=1048576)); then
+    journal_size_limit=$(echo "scale=2; $journal_size_limit / 1048576" | bc)
+    journal_size_limit="${journal_size_limit}MB"
+else
+    journal_size_limit="${journal_size_limit}B"
+fi
+
+# Check if usage_percentage is greater than or equal to the threshold
+if (( $(echo "$usage_percentage >= $THRESHOLD" | bc -l) ))
+then
+    echo "CRITICAL: Journal usage exceeds $THRESHOLD% ! ($journal_size/$journal_size_limit)|'journal_usage'=$usage_percentage;;$THRESHOLD;0;100"
+    exit $STATE_CRITICAL
+else
+    echo "OK: Journal usage is normal. $usage_percentage% ($journal_size/$journal_size_limit)|'journal_usage'=$usage_percentage;;$THRESHOLD;0;100"
+    exit $STATE_OK
+fi

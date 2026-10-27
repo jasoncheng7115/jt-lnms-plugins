@@ -1,0 +1,179 @@
+#!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+#
+# Comparison of differences in web content changes
+# v1.1
+#
+# https://github.com/jasoncheng7115/jt-lnms-plugins
+# https://blog.jason.tools
+#
+# jason@jason.tools
+# 2023/12/26  v1.0
+# 2026/10/27  v1.1  state kept in /var/tmp (survives reboot, migrated from /tmp);
+#                   -d compares the absolute difference (shrinking pages too);
+#                   -P keeps alerting until the change is accepted with -A;
+#                   HTTP errors are CRITICAL; diff excerpt truncation fixed
+
+# Nagios states
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+
+# Default allowed difference
+allowed_diff=-1
+persistent=0
+accept=0
+state_dir=/var/tmp/check_diff_webhtml
+
+# Function to convert file size to human readable format
+function filesize {
+    local size=$1
+    if ((size > 1024**3)); then
+        echo $(bc <<< "scale=2; $size / (1024^3)")"GB"
+    elif ((size > 1024**2)); then
+        echo $(bc <<< "scale=2; $size / (1024^2)")"MB"
+    elif ((size > 1024)); then
+        echo $(bc <<< "scale=2; $size / 1024")"KB"
+    else
+        echo ${size}"B"
+    fi
+}
+
+# Function to display help message
+function display_help {
+  echo "Usage: $0 [-H url] [-S] [-d num] [-k] [-P] [-A] [-h]"
+  echo "  -H: URL to fetch. The URL should be in the format 'www.example.com'"
+  echo "  -S: Use HTTPS"
+  echo "  -d: Allowed difference in character count (either direction)"
+  echo "  -k: Ignore HTTPS certificate check"
+  echo "  -P: Persistent: after a change, keep reporting CRITICAL until it is accepted"
+  echo "  -A: Accept the current content as the new baseline (use with -P, run by hand)"
+  echo "  -h: Show this help message and exit"
+  echo ""
+  echo "This script fetches the content of a URL and compares it with the previous content."
+  echo "If the difference in character count is greater than the allowed difference, it outputs a CRITICAL status."
+  echo "If the difference is within the allowed difference, or if the content is unchanged, it outputs an OK status."
+  echo "If this is the first time the script is run, there is no previous content to compare with, so it also outputs an OK status."
+  echo "Without -P the current content always becomes the next baseline, so a change is reported once."
+  echo "State files are kept in $state_dir."
+  exit $STATE_OK
+}
+
+# Parse command line arguments
+while getopts "H:Sd:hkPA" opt; do
+  case ${opt} in
+    H )
+      url=$OPTARG
+      ;;
+    S )
+      protocol="https"
+      ;;
+    d )
+      allowed_diff=$OPTARG
+      ;;
+    h )
+      display_help
+      ;;
+    k )
+      ignore_cert_check="-k"
+      ;;
+    P )
+      persistent=1
+      ;;
+    A )
+      accept=1
+      ;;
+    \? )
+      echo "Invalid option: $OPTARG" 1>&2
+      exit $STATE_UNKNOWN
+      ;;
+    : )
+      display_help
+      ;;
+  esac
+done
+shift $((OPTIND -1))
+
+# Check if URL is provided
+if [ -z "$url" ]; then
+  display_help
+fi
+
+if ! [[ "$allowed_diff" =~ ^-?[0-9]+$ ]]; then
+  echo "UNKNOWN: -d must be a number"
+  exit $STATE_UNKNOWN
+fi
+
+# Default to HTTP if not specified
+protocol=${protocol:-http}
+
+if ! mkdir -p "$state_dir" 2>/dev/null; then
+  echo "UNKNOWN: Cannot create state directory $state_dir"
+  exit $STATE_UNKNOWN
+fi
+
+# Hash the URL for the filename
+filename=$(echo -n "$url" | md5sum | awk '{print $1}')
+filepath="$state_dir/$filename"
+
+# v1.0 kept the baseline in /tmp; carry it over once
+if [ ! -f "$filepath.previous" ] && [ -f "/tmp/$filename.previous" ]; then
+  mv "/tmp/$filename.previous" "$filepath.previous" 2>/dev/null
+fi
+
+# Fetch the URL content
+if ! curl -s -f --max-time 30 $ignore_cert_check -o "$filepath" "$protocol://$url"; then
+  rm -f "$filepath"
+  echo "CRITICAL: Failed to fetch URL content"
+  exit $STATE_CRITICAL
+fi
+
+if [ "$accept" -eq 1 ]; then
+  mv "$filepath" "$filepath.previous"
+  echo "OK: Current content accepted as the new baseline (File size: $(filesize $(wc -c <"$filepath.previous")))"
+  exit $STATE_OK
+fi
+
+# Compare with previous content and output Nagios status
+exit_status=$STATE_OK
+diff_output=""
+if [ -f "$filepath.previous" ]; then
+  # Calculate the difference in character count
+  char_diff=$(expr $(wc -c <"$filepath") - $(wc -c <"$filepath.previous"))
+  abs_diff=${char_diff#-}
+  if [ $char_diff -eq 0 ]; then
+    echo "OK: Content is unchanged (File size: $(filesize $(wc -c <"$filepath")))"
+  else
+    # Get the difference in content
+    diff_output=$(diff "$filepath" "$filepath.previous" | tr -d '\n' | head -c 13)
+    if [ ${#diff_output} -gt 12 ]; then
+      diff_output="${diff_output:0:12}..."
+    fi
+    # "|" would start the perfdata in LibreNMS
+    diff_output=${diff_output//|//}
+    if [ $allowed_diff -ge 0 -a $abs_diff -le $allowed_diff ]; then
+      echo "OK: Content is within allowed difference (Difference text is \"$diff_output\") (File size: $(filesize $(wc -c <"$filepath")), Previous file size: $(filesize $(wc -c <"$filepath.previous")))"
+    else
+      echo "CRITICAL: Content has changed. Difference in character count: $char_diff (Difference text is \"$diff_output\") (File size: $(filesize $(wc -c <"$filepath")), Previous file size: $(filesize $(wc -c <"$filepath.previous")))"
+      exit_status=$STATE_CRITICAL
+    fi
+  fi
+else
+  echo "OK: First time execution, no previous content to compare with (File size: $(filesize $(wc -c <"$filepath")))"
+fi
+
+# In persistent mode a changed page keeps the old baseline, so the alert stays until -A
+if [ "$persistent" -eq 1 ] && [ $exit_status -eq $STATE_CRITICAL ]; then
+  rm -f "$filepath"
+  exit $exit_status
+fi
+
+# Rename the current file to .previous for next time
+if ! mv -f "$filepath" "$filepath.previous"; then
+  echo "ERROR: Failed to update previous file"
+  exit $STATE_UNKNOWN
+fi
+
+exit $exit_status

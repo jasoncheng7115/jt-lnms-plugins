@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""LibreNMS/Nagios Strata API check. -l zh-tw|en; default zh-tw. -w/-c: queued requests (default 2/5), inclusive thresholds.
+Read-only: GET /v1/status and /metrics; never loads a model or generates text.
+GPU/RAM usage is whole-machine usage, not model-process usage.
+Perfdata keys are fixed across language, state and model changes.
+Version: 1.0
+Author: Jason Cheng (Jason Tools) <jason@jason.tools>
+https://github.com/jasoncheng7115/jt-lnms-plugins
+If the API is unreachable, asks the image API on the same host (--comfy-api-port, default 8189) whether ComfyUI holds the GPU: then OK (mutually exclusive).
+"""
+import argparse
+import json
+import math
+import socket
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+TEXT = {
+ 'zh-tw': {'ready':'已載入', 'unloaded':'模型未載入（API 正常）', 'offline':'API 無法連線（可能已手動停止）', 'comfy':'已停止（GPU 由 ComfyUI 產圖使用中）', 'bothdown':'Strata 與 ComfyUI 都未執行', 'comfyui':'ComfyUI', 'on':'執行中', 'off':'停止', 'imgapi':'圖片 API (8189)', 'up':'正常', 'down':'無法連線', 'http':'API HTTP 錯誤', 'invalid':'API 資料格式不正確', 'key':'無法讀取 API key 檔', 'gpu':'整張 GPU', 'ram':'系統 RAM', 'ctx':'上下文上限', 'last':'上一筆請求', 'prompt':'輸入', 'output':'輸出', 'reused':'重用', 'fill':'輸入＋輸出占上限', 'decode':'生成', 'prefill':'讀取', 'duration':'耗時', 'age':'距今', 'idle':'閒置', 'reading':'讀取中', 'generating':'生成中', 'queued':'排隊', 'state':'狀態', 'cache':'專家快取', 'hit':'專家命中率', 'unavailable':'無資料', 'loading':'載入中', 'queue_limit':'排隊數 %d ≥ %d', 'queue_invalid':'無法取得有效排隊數'},
+ 'en': {'ready':'loaded', 'unloaded':'model unloaded (API available)', 'offline':'API unreachable (may be manually stopped)', 'comfy':'stopped (GPU in use by ComfyUI)', 'bothdown':'neither Strata nor ComfyUI running', 'comfyui':'ComfyUI', 'on':'running', 'off':'stopped', 'imgapi':'image API (8189)', 'up':'up', 'down':'down', 'http':'API HTTP error', 'invalid':'invalid API data', 'key':'cannot read API key file', 'gpu':'whole GPU', 'ram':'system RAM', 'ctx':'context limit', 'last':'last request', 'prompt':'input', 'output':'output', 'reused':'reused', 'fill':'input+output / limit', 'decode':'decode', 'prefill':'prefill', 'duration':'duration', 'age':'age', 'idle':'idle', 'reading':'reading', 'generating':'generating', 'queued':'queued', 'state':'state', 'cache':'expert cache', 'hit':'expert hit rate', 'unavailable':'unavailable', 'loading':'loading', 'queue_limit':'queued requests %d >= %d', 'queue_invalid':'valid queue count unavailable'}
+}
+# U means unavailable, never a fabricated zero. MiB/GiB names encode binary units.
+PERF = ('loaded','gpuusedmib','gputotalmib','gpuutilpct','ramusedgib','ctxlimit','lastprompt','lastoutput','lastreused','lastctxpct','lastdecodetps','lastprefilltps','lastseconds','lastagesec','experthitpct','expertcachemib','queued','livetps')
+
+def number(v):
+ return isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v)
+
+def main():
+ p=argparse.ArgumentParser(description=__doc__)
+ p.add_argument('-H','--host',required=True);p.add_argument('-p','--port',type=int,default=8080)
+ p.add_argument('-t','--timeout',type=float,default=8);p.add_argument('-l','--language',choices=['zh-tw','en'],default='zh-tw')
+ p.add_argument('--api-key-file',required=True);p.add_argument('--comfy-api-port',type=int,default=8189);p.add_argument('--ssl',action='store_true')
+ p.add_argument('-w','--warning',type=int,default=2,help='WARNING when queued requests >= N (default: 2)')
+ p.add_argument('-c','--critical',type=int,default=5,help='CRITICAL when queued requests >= N (default: 5)')
+ a=p.parse_args()
+ if a.warning<1 or a.critical<=a.warning:p.error('require 1 <= warning < critical')
+ t=TEXT[a.language];perf=dict.fromkeys(PERF);lines=[]
+ def emit(code,summary):
+  print('STRATA '+{0:'OK',1:'WARNING',2:'CRITICAL',3:'UNKNOWN'}[code]+' - '+summary.replace('|','/'))
+  for line in lines:print(str(line).replace('|','/').replace('\r',' '))
+  print('| '+' '.join(k+'='+('%.3f'%perf[k] if number(perf[k]) else 'U')+(f';{a.warning};{a.critical};0' if k=='queued' else ';;;0') for k in PERF))
+  return code
+ try:
+  token=Path(a.api_key_file).read_text().strip()
+  if not token:raise ValueError()
+ except (OSError,ValueError):return emit(3,t['key'])
+ def comfy_state():
+  # None = image API unreachable, so ComfyUI state unknown
+  try:
+   with urllib.request.urlopen('http://'+a.host+':'+str(a.comfy_api_port)+'/status',timeout=3) as r:
+    return json.loads(r.read(65536)).get('comfyui') is True
+  except Exception:return None
+ def comfy_lines(c):
+  return [t['comfyui']+': '+(t['unavailable'] if c is None else t['on'] if c else t['off'])+' · '+t['imgapi']+': '+(t['down'] if c is None else t['up'])]
+ base=('https' if a.ssl else 'http')+'://'+a.host+':'+str(a.port)
+ deadline=time.monotonic()+a.timeout
+ def get(path):
+  remaining=deadline-time.monotonic()
+  if remaining<=0:raise TimeoutError()
+  req=urllib.request.Request(base+path,headers={'Authorization':'Bearer '+token,'Accept':'application/json'})
+  with urllib.request.urlopen(req,timeout=remaining) as r:
+   raw=r.read(4*1024*1024+1)
+   if len(raw)>4*1024*1024:raise ValueError()
+   d=json.loads(raw)
+   if not isinstance(d,dict):raise ValueError()
+   return d
+ try:
+  status=get('/v1/status');m=get('/metrics')
+ except urllib.error.HTTPError as e:return emit(2,t['http']+' '+str(e.code))
+ except (urllib.error.URLError,socket.timeout,TimeoutError,OSError):
+  comfy=comfy_state()
+  lines.extend(['']+comfy_lines(comfy))
+  if comfy is True:perf['loaded']=0;return emit(0,t['comfy'])
+  return emit(1,t['bothdown'] if comfy is False else t['offline'])
+ except (ValueError,TypeError):return emit(3,t['invalid'])
+ if not isinstance(status.get('loaded'),bool) or not isinstance(m.get('engine'),dict) or not isinstance(m.get('live'),dict):return emit(3,t['invalid'])
+ engine=m.get('engine') or {};live=m.get('live') or {};gpu=(status.get('machine') or {}).get('gpu') or {};ram=(status.get('machine') or {}).get('ram') or {}
+ loaded=status.get('loaded') is True
+ perf.update(loaded=int(loaded),gpuusedmib=gpu.get('used_mib'),gputotalmib=gpu.get('total_mib'),gpuutilpct=gpu.get('util_pct'),ramusedgib=ram.get('used_gib'),ctxlimit=engine.get('max_context'),expertcachemib=engine.get('expert_cache_mib') if loaded else None,queued=live.get('queued'),livetps=live.get('tok_s_mean'))
+ model=str(status.get('model') or engine.get('model') or '?').replace('\n',' ')
+ def fmt(v,places=1):return ('%.*f'%(places,v)) if number(v) else t['unavailable']
+ queue=perf['queued']
+ if not number(queue) or queue<0 or int(queue)!=queue:return emit(3,t['queue_invalid'])
+ code=2 if queue>=a.critical else 1 if queue>=a.warning else 0
+ summary=(t['ready'] if loaded else t['unloaded'])+' · '+model
+ if code:summary+=' · '+t['queue_limit']%(queue,a.critical if code==2 else a.warning)
+ lines.append('')
+ lines.append(t['gpu']+': '+fmt(gpu.get('used_mib'))+' / '+fmt(gpu.get('total_mib'))+' MiB')
+ lines.append(t['ram']+': '+fmt(ram.get('used_gib'))+' / '+fmt(ram.get('total_gib'))+' GiB')
+ lines.append(t['ctx']+': '+fmt(perf['ctxlimit'],0)+' tokens')
+ state=str(live.get('state') or 'idle');lines.append(t['state']+': '+t.get(state,state)+' · '+t['queued']+': '+fmt(perf['queued'],0))
+ if loaded:lines.append(t['cache']+': '+fmt(perf['expertcachemib'])+' MiB')
+ requests=m.get('requests') or []
+ last=requests[0] if requests else None
+ if isinstance(last,dict):
+  pn=last.get('prompt_tokens');on=last.get('output_tokens');ctx=perf['ctxlimit']
+  pct=(pn+on)/ctx*100 if all(number(v) for v in (pn,on,ctx)) and ctx>0 else None
+  age=max(0,time.time()-last['time']-last.get('duration_s',0)) if number(last.get('time')) else None
+  prefill=last.get('prompt_read')/last['prompt_ms']*1000 if number(last.get('prompt_read')) and number(last.get('prompt_ms')) and last['prompt_ms']>0 else None
+  hit=last.get('hit_rate')
+  perf.update(lastprompt=pn,lastoutput=on,lastreused=last.get('reused'),lastctxpct=pct,lastdecodetps=last.get('decode_tok_s'),lastprefilltps=prefill,lastseconds=last.get('duration_s'),lastagesec=age,experthitpct=hit*100 if number(hit) else None)
+  lines.extend(['',t['last']+' ('+t['age']+' '+fmt(age,0)+' s)',t['prompt']+': '+fmt(pn,0)+' · '+t['output']+': '+fmt(on,0),t['reused']+': '+fmt(perf['lastreused'],0),t['fill']+': '+fmt(pct)+'%',t['decode']+': '+fmt(perf['lastdecodetps'])+' tok/s · '+t['duration']+': '+fmt(perf['lastseconds'])+' s',t['prefill']+': '+fmt(prefill)+' tok/s',t['hit']+': '+fmt(perf['experthitpct'])+'%'])
+ else:lines.extend(['',t['last']+': '+t['unavailable']])
+ lines.extend(['']+comfy_lines(comfy_state()))
+ lines.extend(['','Strata '+str(engine.get('version') or engine.get('engine') or '?')])
+ return emit(code,summary)
+
+if __name__=='__main__':
+ try:sys.exit(main())
+ except Exception as e:
+  print('STRATA UNKNOWN - '+type(e).__name__);sys.exit(3)

@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""check_pyhs - power usage of TP-Link Kasa power strips (HS300) per outlet, via the pyhs100 CLI.
+
+Version: 1.1
+Author: Jason Cheng (Jason Tools) <jason@jason.tools>
+https://github.com/jasoncheng7115/jt-lnms-plugins
+
+1.0 (2025/02/08)  first release
+1.1 (2026/10/27)  all-outlet mode prints perfdata once on the last line (plugN_ labels),
+                  so LibreNMS parses it; errors detected by exit code instead of any
+                  stderr output; outlet names read in order; 30 s timeout; --plug checked
+"""
+import argparse
+import sys
+import subprocess
+import re
+import ast
+
+def parse_threshold(threshold_str):
+    thresholds = {}
+    if not threshold_str:
+        return thresholds
+        
+    for item in threshold_str.split(','):
+        if ':' not in item:
+            continue
+            
+        if item.startswith('plug'):
+            plug_num, metric, value = item.split(':')
+            plug_num = int(plug_num[4:])
+            if plug_num not in thresholds:
+                thresholds[plug_num] = {}
+            thresholds[plug_num][metric] = float(value)
+        else:
+            metric, value = item.split(':')
+            if 'all' not in thresholds:
+                thresholds['all'] = {}
+            thresholds['all'][metric] = float(value)
+    return thresholds
+
+def check_thresholds(plug_num, metric, value, warning, critical):
+    def check_value(thresholds):
+        if not thresholds:
+            return 0
+        threshold_value = None
+        if plug_num in thresholds and metric in thresholds[plug_num]:
+            threshold_value = thresholds[plug_num][metric]
+        elif 'all' in thresholds and metric in thresholds['all']:
+            threshold_value = thresholds['all'][metric]
+            
+        if threshold_value is not None and float(value) >= threshold_value:
+            return 2 if thresholds == critical else 1
+        return 0
+
+    severity = check_value(critical)
+    if severity == 0:
+        severity = check_value(warning)
+        
+    return severity, "CRITICAL" if severity == 2 else "WARNING" if severity == 1 else "OK"
+
+def get_plug_status(plug_num, plug_data, plug_name, warning, critical, prefix=''):
+    max_severity = 0
+    status_text = "OK"
+    status_details = []
+    
+    def format_perf(label, value, warn=None, crit=None):
+        perf = f"{prefix}{label}={value}"
+        if warn is not None or crit is not None:
+            perf += f";{warn if warn is not None else ''}"
+            perf += f";{crit if crit is not None else ''}"
+        return perf
+    
+    def get_threshold(thresholds, metric):
+        if not thresholds:
+            return None
+        if plug_num in thresholds and metric in thresholds[plug_num]:
+            return thresholds[plug_num][metric]
+        elif 'all' in thresholds and metric in thresholds['all']:
+            return thresholds['all'][metric]
+        return None
+
+    perf_data = []
+    for metric in plug_data:
+        if metric != 'slot_id':
+            value = plug_data[metric]
+            severity, status = check_thresholds(plug_num, metric, value, warning, critical)
+            if severity > max_severity:
+                max_severity = severity
+                status_text = status
+            if severity > 0:
+                status_details.append(f"{metric}={value}")
+            perf_data.append(format_perf(metric, value, 
+                                       get_threshold(warning, metric),
+                                       get_threshold(critical, metric)))
+    
+    return max_severity, status_text, status_details, " ".join(perf_data)
+
+def get_status(host, plug_num, warning, critical, show_device_name):
+    try:
+        try:
+            result = subprocess.run(["pyhs100", "--host", host], capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            print(f"CRITICAL - Cannot connect to {host} (timeout)")
+            sys.exit(2)
+
+        # pyhs100 exits 1 with a traceback on errors; warnings on stderr with exit 0 are ignored
+        if result.returncode != 0:
+            err = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"exit code {result.returncode}"
+            if any(x in result.stderr for x in ("Communication error", "TimeoutError", "timed out", "ConnectionRefused", "No route")):
+                print(f"CRITICAL - Cannot connect to {host}")
+            else:
+                print(f"CRITICAL - Failed to get device status: {err}")
+            sys.exit(2)
+
+        output = result.stdout
+        match = re.search(r'== Current State ==\n(.*?)\n(?:==|$)', output, re.DOTALL)
+        if not match:
+            print("CRITICAL - Failed to find Current State section")
+            sys.exit(2)
+
+        current_state = ast.literal_eval(match.group(1).strip())
+
+        device_name = ""
+        if show_device_name:
+            device_name = next((line.strip("= ")
+                              for line in output.split('\n')
+                              if "TP-LINK" in line), "Unknown") + " "
+
+        # Outlets are listed in order as "  * <name> state: ON"; the name may start with its number
+        plug_names = {}
+        for line in output.split('\n'):
+            m = re.match(r'\s*\* (.*?) state:', line)
+            if m and len(plug_names) < len(current_state):
+                n = len(plug_names) + 1
+                plug_names[n] = re.sub(r'^%d ' % n, '', m.group(1)).strip()
+
+        if plug_num:
+            slot_id = int(plug_num) - 1
+            plug_data = current_state[slot_id]
+            max_severity, status_text, status_details, perf_data = get_plug_status(
+                int(plug_num), plug_data, plug_names.get(int(plug_num), "Unknown"),
+                warning, critical)
+
+            msg = f"{status_text} - {device_name}Plug {plug_num} ({plug_names.get(int(plug_num), 'Unknown')})"
+            if status_details:
+                msg += f" - Alert on: {', '.join(status_details)}"
+            msg += f" |{perf_data}"
+
+            print(msg)
+            sys.exit(max_severity)
+        else:
+            overall_max_severity = 0
+            output_lines = []
+            all_perf = []
+
+            for plug_num in range(1, len(current_state) + 1):
+                slot_id = plug_num - 1
+                plug_data = current_state[slot_id]
+                max_severity, status_text, status_details, perf_data = get_plug_status(
+                    plug_num, plug_data, plug_names.get(plug_num, "Unknown"),
+                    warning, critical, prefix=f"plug{plug_num}_")
+
+                overall_max_severity = max(overall_max_severity, max_severity)
+
+                line = f"Plug {plug_num} ({plug_names.get(plug_num, 'Unknown')}): {status_text}"
+                if status_details:
+                    line += f" - Alert on: {', '.join(status_details)}"
+                output_lines.append(line)
+                all_perf.append(perf_data)
+
+            # LibreNMS splits the whole output on the first "|", so perfdata goes once, last
+            status_text = "OK" if overall_max_severity == 0 else "WARNING" if overall_max_severity == 1 else "CRITICAL"
+            print(f"{status_text} - {device_name}Status for all plugs:")
+            for line in output_lines:
+                print(line)
+            print("| " + " ".join(all_perf))
+            sys.exit(overall_max_severity)
+
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"UNKNOWN - Error: {str(e)}")
+        sys.exit(3)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-H", "--host", required=True, help="Device IP address")
+    parser.add_argument("--plug", help="Plug number (1-6), if not specified will show all plugs")
+    parser.add_argument("-w", "--warning", help="Warning thresholds (e.g. power_mw:200000 or plug2:power_mw:200000)")
+    parser.add_argument("-c", "--critical", help="Critical thresholds (e.g. power_mw:300000 or plug2:power_mw:300000)")
+    parser.add_argument("--show-device-name", action="store_true", help="Show device name in output")
+    args = parser.parse_args()
+
+    if args.plug is not None and args.plug not in [str(n) for n in range(1, 7)]:
+        print("UNKNOWN - --plug must be 1-6")
+        sys.exit(3)
+    
+    warning_thresholds = parse_threshold(args.warning) if args.warning else None
+    critical_thresholds = parse_threshold(args.critical) if args.critical else None
+    
+    get_status(args.host, args.plug, warning_thresholds, critical_thresholds, args.show_device_name)
+
+if __name__ == "__main__":
+    main()
