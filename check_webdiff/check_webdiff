@@ -1,0 +1,529 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""check_webdiff - LibreNMS/Nagios check that a web page has not been tampered with.
+
+Version: 1.0
+Author: Jason Cheng (Jason Tools) <jason@jason.tools>
+https://github.com/jasoncheng7115/jt-lnms-plugins
+
+Fetches a page, strips content that changes on every request (cache-busting
+parameters, nonces, CSRF tokens, timestamps, HTML comments), and compares the
+rest with a stored baseline. When something differs the page is fetched once
+more: parts that differ between the two fetches are random and are ignored,
+only changes present in both count. External script/iframe/form hosts are
+tracked separately, and expected / rejected text can be checked on every run.
+A change keeps being reported until it is accepted with --accept (or use --once).
+
+Replaces check_diff_webhtml (different options, not compatible).
+
+Exit: 0 OK / 1 WARNING / 2 CRITICAL / 3 UNKNOWN
+"""
+
+import argparse
+import difflib
+import fcntl
+import hashlib
+import html
+import html.parser
+import json
+import os
+import re
+import ssl
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+VERSION = '1.0'
+OK, WARNING, CRITICAL, UNKNOWN = 0, 1, 2, 3
+STATE = {OK: 'OK', WARNING: 'WARNING', CRITICAL: 'CRITICAL', UNKNOWN: 'UNKNOWN'}
+MAX_BODY = 5 * 1024 * 1024
+STATE_DIR = '/var/tmp/check_webdiff'
+USER_AGENT = 'check_webdiff/%s (+https://github.com/jasoncheng7115/jt-lnms-plugins)' % VERSION
+
+MSG = {
+    'en': {
+        'unchanged': 'Content unchanged', 'baseline': 'Baseline created', 'accepted': 'Current content accepted as the new baseline',
+        'changed': 'Content changed: %d block(s), %d bytes', 'within': 'Content changed within the allowed %d bytes: %d block(s), %d bytes',
+        'still': 'not accepted yet, baseline from %s (accept with --accept)', 'newhost': 'New external host(s): %s',
+        'missing': 'Expected text not found: %s', 'rejected': 'Rejected text found: %s',
+        'offsite': 'Redirects to another site: %s', 'fetch': 'Fetch failed: %s', 'status': 'HTTP %d (expected %s)',
+        'nourl': 'No URL given (-u URL, or -H host)', 'badre': 'Invalid --ignore pattern %s: %s', 'lock': 'Another check of this URL is running',
+        'ignored': 'ignored', 'random': 'random between two fetches',
+    },
+    'zh-tw': {
+        'unchanged': '內容沒有變更', 'baseline': '已建立比較基準', 'accepted': '已接受目前內容為新的比較基準',
+        'changed': '內容已變更：%d 處，%d bytes', 'within': '內容變更在允許的 %d bytes 內：%d 處，%d bytes',
+        'still': '尚未接受，比較基準建立於 %s（確認後用 --accept 接受）', 'newhost': '出現新的外部主機：%s',
+        'missing': '找不到預期的文字：%s', 'rejected': '出現不允許的文字：%s',
+        'offsite': '轉址到其他網站：%s', 'fetch': '抓取失敗：%s', 'status': 'HTTP %d（預期 %s）',
+        'nourl': '沒有指定網址（-u URL 或 -H 主機）', 'badre': '--ignore 的規則 %s 不正確：%s', 'lock': '同一個網址的檢查正在執行',
+        'ignored': '已排除', 'random': '兩次抓取不同而略過',
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Normalization: replace values that change on every request with placeholders
+# ---------------------------------------------------------------------------
+BUSTER_PARAMS = r'(?:v|ver|version|t|ts|time|timestamp|_|cb|cachebuster|cache|rand|random|r|nocache|nc|bust|rev|hash)'
+BUILTIN_RULES = [
+    ('comment',   re.compile(r'<!--(?!\[if).*?-->', re.S), ''),
+    ('buster',    re.compile(r'([?&](?:amp;)?' + BUSTER_PARAMS + r'=)[^&"\'\s<>#]*', re.I), r'\1#'),
+    ('qnumber',   re.compile(r'([?&](?:amp;)?[\w.-]+=)(?:\d{6,}|[0-9a-f]{16,})(?=[&"\'\s<>#]|$)', re.I), r'\1#'),
+    ('nonce',     re.compile(r'(\b(?:nonce|data-nonce|data-csrf|data-token)\s*=\s*["\'])[^"\']*', re.I), r'\1#'),
+    ('csrf-meta', re.compile(r'(<meta[^>]+name\s*=\s*["\'](?:csrf[-_]?token|csrf[-_]?param|_token|xsrf[-_]?token)["\'][^>]*content\s*=\s*["\'])[^"\']*', re.I), r'\1#'),
+    ('csrf-meta', re.compile(r'(<meta[^>]+content\s*=\s*["\'])[^"\']*(["\'][^>]*name\s*=\s*["\'](?:csrf[-_]?token|_token|xsrf[-_]?token)["\'])', re.I), r'\1#\2'),
+    ('token-input', re.compile(r'(<input[^>]+name\s*=\s*["\'](?:_?csrf\w*|_token|authenticity_token|_wpnonce|__VIEWSTATE\w*|__EVENTVALIDATION|__RequestVerificationToken|form_build_id|form_token|security|nonce)["\'][^>]*value\s*=\s*["\'])[^"\']*', re.I), r'\1#'),
+    ('token-input', re.compile(r'(<input[^>]+value\s*=\s*["\'])[^"\']*(["\'][^>]*name\s*=\s*["\'](?:_?csrf\w*|_token|authenticity_token|_wpnonce|__VIEWSTATE\w*|__EVENTVALIDATION|__RequestVerificationToken|form_build_id|form_token|security|nonce)["\'])', re.I), r'\1#\2'),
+    ('js-nonce',  re.compile(r'(["\'](?:nonce|_wpnonce|ajax_nonce|csrf_token|csrfToken|_token)["\']\s*:\s*["\'])[^"\']*', re.I), r'\1#'),
+    ('datetime',  re.compile(r'\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}[T ]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?'), '#DATETIME#'),
+    ('time',      re.compile(r'\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b'), '#TIME#'),
+    ('epoch',     re.compile(r'(?<![\w.])1[0-9]{9}(?:[0-9]{3})?(?![\w.])'), '#EPOCH#'),
+    ('uuid',      re.compile(r'\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', re.I), '#UUID#'),
+]
+
+
+def normalize(text, raw, extra):
+    hits = {}
+    if not raw:
+        for name, rx, rep in BUILTIN_RULES:
+            text, n = rx.subn(rep, text)
+            if n:
+                hits[name] = hits.get(name, 0) + n
+    for rx in extra:
+        text, n = rx.subn('#IGNORED#', text)
+        if n:
+            hits['ignore'] = hits.get('ignore', 0) + n
+    return text, hits
+
+
+def to_lines(text):
+    """One tag or text run per line, whitespace collapsed, so diffs show what changed."""
+    text = re.sub(r'\s+', ' ', text)
+    return [l.strip() for l in re.sub(r'(<[^>]+>)', r'\n\1\n', text).split('\n') if l.strip()]
+
+
+# ---------------------------------------------------------------------------
+# HTML views: visible text, key elements, external hosts
+# ---------------------------------------------------------------------------
+class Scanner(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.text, self.key, self.refs = [], [], []
+        self._skip = 0
+        self._title = False
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag in ('script', 'style', 'noscript', 'template'):
+            self._skip += 1
+        if tag == 'title':
+            self._title = True
+        if tag == 'script':
+            if a.get('src'):
+                self.key.append('script src=%s integrity=%s' % (a['src'], a.get('integrity', '')))
+                self.refs.append(a['src'])
+            else:
+                self.key.append('script inline')
+        elif tag == 'iframe' and a.get('src'):
+            self.key.append('iframe src=%s' % a['src'])
+            self.refs.append(a['src'])
+        elif tag == 'form':
+            self.key.append('form action=%s method=%s' % (a.get('action', ''), a.get('method', 'get').lower()))
+            if a.get('action'):
+                self.refs.append(a['action'])
+        elif tag == 'link' and 'stylesheet' in (a.get('rel') or '').lower() and a.get('href'):
+            self.key.append('stylesheet href=%s' % a['href'])
+        elif tag == 'meta' and (a.get('http-equiv') or '').lower() == 'refresh':
+            self.key.append('meta refresh=%s' % a.get('content', ''))
+        elif tag == 'base' and a.get('href'):
+            self.key.append('base href=%s' % a['href'])
+        elif tag in ('embed', 'object') and (a.get('src') or a.get('data')):
+            self.key.append('%s src=%s' % (tag, a.get('src') or a.get('data')))
+            self.refs.append(a.get('src') or a.get('data'))
+
+    def handle_endtag(self, tag):
+        if tag in ('script', 'style', 'noscript', 'template') and self._skip:
+            self._skip -= 1
+        if tag == 'title':
+            self._title = False
+
+    def handle_data(self, data):
+        d = ' '.join(data.split())
+        if not d:
+            return
+        if self._title:
+            self.key.append('title=%s' % d)
+        if not self._skip:
+            self.text.append(d)
+
+
+def scan(text):
+    s = Scanner()
+    try:
+        s.feed(text)
+        s.close()
+    except Exception:  # noqa: BLE001 - broken HTML: use what was parsed so far
+        pass
+    return s
+
+
+def site_of(host):
+    """example.com for www.example.com; good enough to tell own subdomains from third parties."""
+    parts = (host or '').lower().strip('.').split('.')
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in ('com', 'net', 'org', 'gov', 'edu', 'co', 'ac', 'or', 'ne', 'go', 'idv'):
+        return '.'.join(parts[-3:])
+    return '.'.join(parts[-2:])
+
+
+def external_hosts(refs, page_url):
+    own = site_of(urllib.parse.urlsplit(page_url).hostname)
+    hosts = set()
+    for r in refs:
+        h = urllib.parse.urlsplit(urllib.parse.urljoin(page_url, r.strip())).hostname
+        if h and site_of(h) != own:
+            hosts.add(h.lower())
+    return hosts
+
+
+# ---------------------------------------------------------------------------
+# Fetching
+# ---------------------------------------------------------------------------
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def fetch(url, a):
+    ctx = ssl.create_default_context()
+    if a.insecure:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    handlers = [urllib.request.HTTPSHandler(context=ctx)]
+    if a.no_follow:
+        handlers.append(NoRedirect())
+    opener = urllib.request.build_opener(*handlers)
+    req = urllib.request.Request(url, headers={'User-Agent': a.user_agent, 'Accept': 'text/html,*/*;q=0.8',
+                                               'Accept-Encoding': 'identity', 'Cache-Control': 'no-cache'})
+    start = time.monotonic()
+    try:
+        r = opener.open(req, timeout=a.timeout)
+        status = r.status
+    except urllib.error.HTTPError as e:
+        r, status = e, e.code
+    body = r.read(MAX_BODY + 1)
+    final = r.geturl()
+    charset = r.headers.get_content_charset()
+    r.close()
+    if len(body) > MAX_BODY:
+        raise ValueError('page larger than %d MB' % (MAX_BODY // 1024 // 1024))
+    if not charset:
+        m = re.search(rb'<meta[^>]+charset\s*=\s*["\']?([\w-]+)', body[:4096], re.I)
+        charset = m.group(1).decode('ascii') if m else 'utf-8'
+    try:
+        text = body.decode(charset, 'replace')
+    except LookupError:
+        text = body.decode('utf-8', 'replace')
+    return status, final, body, text, time.monotonic() - start
+
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+def atomic_write(path, data):
+    d = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix='.tmp-')
+    with os.fdopen(fd, 'wb') as f:
+        f.write(data if isinstance(data, bytes) else data.encode('utf-8'))
+    os.chmod(tmp, 0o640)
+    if os.geteuid() == 0:
+        # --accept run as root: keep the files owned by the monitoring user that owns the folder
+        st = os.stat(d)
+        os.chown(tmp, st.st_uid, st.st_gid)
+    os.replace(tmp, path)
+
+
+def load_json(path, default):
+    try:
+        with open(path, encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def save_history(sd, keep, before, after, sig):
+    if keep <= 0:
+        return
+    hd = os.path.join(sd, 'history')
+    os.makedirs(hd, exist_ok=True)
+    if os.geteuid() == 0:
+        st = os.stat(sd)
+        os.chown(hd, st.st_uid, st.st_gid)
+    # While a change keeps alerting the same change would be saved every run: compare the
+    # normalized content (raw pages differ on every request) and keep each change once
+    sig_path = os.path.join(hd, '.last')
+    try:
+        with open(sig_path) as f:
+            if f.read() == sig:
+                return
+    except OSError:
+        pass
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    if before is not None:
+        atomic_write(os.path.join(hd, stamp + '-before.html'), before)
+    atomic_write(os.path.join(hd, stamp + '-after.html'), after)
+    atomic_write(sig_path, sig)
+    files = sorted(f for f in os.listdir(hd) if not f.startswith('.'))
+    stamps = sorted({f.split('-before')[0].split('-after')[0] for f in files})
+    for old in stamps[:-keep]:
+        for f in files:
+            if f.startswith(old):
+                try:
+                    os.remove(os.path.join(hd, f))
+                except OSError:
+                    pass
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def build_url(a):
+    if a.url:
+        return a.url
+    if not a.host:
+        return None
+    if '://' in a.host:
+        return a.host
+    path = a.path or ''
+    if path and not path.startswith('/'):
+        path = '/' + path
+    return ('http' if a.http else 'https') + '://' + a.host + path
+
+
+def main():
+    p = argparse.ArgumentParser(add_help=False, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    g = p.add_argument_group('target')
+    g.add_argument('-u', '--url', help='full URL to check (takes precedence over -H)')
+    g.add_argument('-H', '--host', help='host name; LibreNMS passes the device host here')
+    g.add_argument('-p', '--path', help='path appended to -H, e.g. /index.html')
+    g.add_argument('--http', action='store_true', help='use http instead of https with -H')
+    g.add_argument('-k', '--insecure', action='store_true', help='do not verify the TLS certificate')
+    g.add_argument('--no-follow', action='store_true', help='do not follow redirects')
+    g.add_argument('--status', default='200', help='accepted HTTP status codes, comma-separated (default 200)')
+    g.add_argument('-t', '--timeout', type=float, default=15, help='timeout in seconds (default 15)')
+    g.add_argument('--user-agent', default=USER_AGENT)
+    c = p.add_argument_group('comparison')
+    c.add_argument('-m', '--mode', choices=['full', 'text', 'key'], default='full',
+                   help='full: whole page; text: visible text only; key: title, scripts, iframes, forms, stylesheets')
+    c.add_argument('-I', '--ignore', action='append', default=[], metavar='REGEX', help='remove matches before comparing; repeatable')
+    c.add_argument('--raw', action='store_true', help='turn off the built-in normalization')
+    c.add_argument('--no-confirm', action='store_true', help='do not fetch again to filter out random parts')
+    c.add_argument('-d', '--max-diff', type=int, default=0, metavar='BYTES', help='changes up to this many bytes are OK (default 0)')
+    c.add_argument('-e', '--expect', action='append', default=[], metavar='TEXT', help='CRITICAL when this text is missing; repeatable')
+    c.add_argument('-x', '--reject', action='append', default=[], metavar='TEXT', help='CRITICAL when this text is present (case-insensitive); repeatable')
+    c.add_argument('--new-hosts', choices=['warn', 'crit', 'off'], default='warn', help='new external script/iframe/form host (default warn)')
+    c.add_argument('--on-change', choices=['warn', 'crit'], default='crit', help='state for a content change (default crit)')
+    c.add_argument('--fetch-error', choices=['unknown', 'crit'], default='unknown', help='state when the page cannot be fetched (default unknown)')
+    s = p.add_argument_group('baseline')
+    s.add_argument('--once', action='store_true', help='report a change once, then make the new content the baseline')
+    s.add_argument('-A', '--accept', action='store_true', help='accept the current content as the new baseline (run by hand)')
+    s.add_argument('--state-dir', default=STATE_DIR, help='where baselines are kept (default %s)' % STATE_DIR)
+    s.add_argument('--keep', type=int, default=5, help='changed versions kept for review (default 5, 0 = none)')
+    o = p.add_argument_group('output')
+    o.add_argument('-v', '--verbose', action='store_true', help='show the changed lines and what was ignored')
+    o.add_argument('--lang', choices=['en', 'zh-tw'], default='en')
+    o.add_argument('-V', '--version', action='store_true')
+    o.add_argument('-h', '--help', action='help')
+    try:
+        a = p.parse_args()
+    except SystemExit as e:
+        return OK if e.code == 0 else UNKNOWN
+    t = MSG[a.lang]
+    if a.version:
+        print('check_webdiff v%s' % VERSION)
+        return OK
+
+    url = build_url(a)
+    if not url:
+        print('UNKNOWN - ' + t['nourl'])
+        return UNKNOWN
+    extra = []
+    for pat in a.ignore:
+        try:
+            extra.append(re.compile(pat, re.S))
+        except re.error as e:
+            print('UNKNOWN - ' + t['badre'] % (pat, e))
+            return UNKNOWN
+    statuses = {int(x) for x in a.status.split(',') if x.strip().isdigit()}
+
+    # One state folder per URL + comparison settings, so changing -m/-I starts a fresh baseline
+    key = hashlib.sha256(json.dumps([url, a.mode, a.raw, a.ignore]).encode()).hexdigest()[:24]
+    sd = os.path.join(a.state_dir, key)
+    os.makedirs(sd, exist_ok=True)
+    if os.geteuid() == 0:
+        st = os.stat(a.state_dir)
+        os.chown(sd, st.st_uid, st.st_gid)
+    lockf = open(os.path.join(sd, '.lock'), 'w')
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print('UNKNOWN - ' + t['lock'])
+        return UNKNOWN
+
+    notes, detail, perf = [], [], {}
+
+    def done(code, text):
+        line = '%s - %s (%s)' % (STATE[code], text, url)
+        if notes:
+            line += '; ' + '; '.join(notes)
+        pd = ' '.join('%s=%s' % kv for kv in perf.items())
+        line = line.replace('|', '/')
+        if detail:
+            print(line)
+            for d in detail:
+                print(d.replace('|', '/')[:300])
+            print('| ' + pd)
+        else:
+            print(line + (' | ' + pd if pd else ''))
+        return code
+
+    fail_state = CRITICAL if a.fetch_error == 'crit' else UNKNOWN
+    sticky = not a.once
+
+    def get():
+        status, final, body, text, sec = fetch(url, a)
+        if status not in statuses:
+            raise ValueError(t['status'] % (status, a.status))
+        return final, body, text, sec
+
+    def view(text):
+        """Lines to compare for the selected mode, plus the ignore statistics."""
+        norm, hits = normalize(text, a.raw, extra)
+        if a.mode == 'full':
+            return to_lines(norm), hits
+        sc = scan(norm)
+        return (sc.text if a.mode == 'text' else sc.key), hits
+
+    try:
+        final, body, text, sec = get()
+    except Exception as e:  # noqa: BLE001
+        reason = getattr(e, 'reason', None) or e
+        return done(fail_state, t['fetch'] % reason)
+    perf['size'] = '%dB;;;0' % len(body)
+    perf['time'] = '%.3fs;;;0' % sec
+
+    if urllib.parse.urlsplit(final).hostname and site_of(urllib.parse.urlsplit(final).hostname) != site_of(urllib.parse.urlsplit(url).hostname):
+        notes.append(t['offsite'] % final)
+
+    lines, hits = view(text)
+    sc = scan(text)
+    hosts = external_hosts(sc.refs, final)
+    perf['hosts'] = '%d;;;0' % len(hosts)
+
+    base_path = os.path.join(sd, 'baseline.json')
+    base = load_json(base_path, None)
+
+    def store(lines_, hosts_, raw):
+        atomic_write(base_path, json.dumps({'url': url, 'mode': a.mode, 'time': time.strftime('%Y-%m-%d %H:%M:%S'),
+                                            'lines': lines_, 'hosts': sorted(hosts_)}, ensure_ascii=False))
+        atomic_write(os.path.join(sd, 'last.html'), raw)
+
+    def stable(first):
+        """Fetch again and keep only lines that both fetches have (drops per-request randomness)."""
+        try:
+            _, _, text2, _ = get()
+        except Exception:  # noqa: BLE001 - keep the first fetch if the second fails
+            return first, 0
+        second, _ = view(text2)
+        sm = difflib.SequenceMatcher(None, first, second, autojunk=False)
+        keep = []
+        for tag, i1, i2, _, _ in sm.get_opcodes():
+            if tag == 'equal':
+                keep.extend(first[i1:i2])
+        return keep, len(first) - len(keep)
+
+    if a.accept or base is None:
+        lines, _ = stable(lines) if not a.no_confirm else (lines, 0)
+        store(lines, hosts, body)
+        if hits and a.verbose:
+            detail.append('%s: %s' % (t['ignored'], ', '.join('%s %d' % kv for kv in sorted(hits.items()))))
+        perf['changed'] = '0B;;%d;0' % a.max_diff
+        return done(OK, t['accepted'] if a.accept else t['baseline'])
+
+    code, msgs = OK, []
+
+    # Expected / rejected text is checked on the raw page every run
+    low = text.lower()
+    for e in a.expect:
+        if e not in text:
+            code = CRITICAL
+            msgs.append(t['missing'] % e)
+    for x in a.reject:
+        if x.lower() in low:
+            code = CRITICAL
+            msgs.append(t['rejected'] % x)
+
+    # New third-party hosts
+    new = sorted(hosts - set(base.get('hosts', [])))
+    if new and a.new_hosts != 'off':
+        code = max(code, CRITICAL if a.new_hosts == 'crit' else WARNING)
+        msgs.append(t['newhost'] % ', '.join(new))
+
+    # Content
+    old = base.get('lines', [])
+    random_lines = 0
+    if lines != old and not a.no_confirm:
+        lines, random_lines = stable(lines)
+    sm = difflib.SequenceMatcher(None, old, lines, autojunk=False)
+    blocks, changed = 0, 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == 'equal':
+            continue
+        blocks += 1
+        changed += sum(len(x.encode('utf-8')) for x in old[i1:i2]) + sum(len(x.encode('utf-8')) for x in lines[j1:j2])
+        if a.verbose and len(detail) < 20:
+            for x in old[i1:i2][:3]:
+                detail.append('- ' + x)
+            for x in lines[j1:j2][:3]:
+                detail.append('+ ' + x)
+    perf['changed'] = '%dB;;%d;0' % (changed, a.max_diff)
+    if a.verbose and (hits or random_lines):
+        info = ['%s %d' % kv for kv in sorted(hits.items())]
+        if random_lines:
+            info.append('%s %d' % (t['random'], random_lines))
+        detail.insert(0, '%s: %s' % (t['ignored'], ', '.join(info)))
+
+    change_state = CRITICAL if a.on_change == 'crit' else WARNING
+    if blocks:
+        if changed <= a.max_diff:
+            msgs.append(t['within'] % (a.max_diff, blocks, changed))
+        else:
+            code = max(code, change_state)
+            msgs.append(t['changed'] % (blocks, changed))
+            if sticky:
+                msgs.append(t['still'] % base.get('time', '?'))
+
+    if blocks and changed > a.max_diff:
+        last = os.path.join(sd, 'last.html')
+        before = open(last, 'rb').read() if os.path.exists(last) else None
+        save_history(sd, a.keep, before, body, hashlib.sha256('\n'.join(lines).encode('utf-8')).hexdigest())
+
+    # By default the old baseline stays until --accept, so a change keeps alerting;
+    # with --once the current page always becomes the next baseline (a change is reported once)
+    alerting = (blocks and changed > a.max_diff) or (new and a.new_hosts != 'off')
+    if a.once or not alerting:
+        store(lines, hosts, body)
+
+    if not msgs:
+        msgs.append(t['unchanged'])
+    return done(code, '; '.join(msgs))
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as e:  # never let a traceback reach the monitoring system
+        print('UNKNOWN - %s: %s' % (type(e).__name__, str(e).replace('|', '/')))
+        sys.exit(UNKNOWN)

@@ -1,5 +1,7 @@
 [English](README.md) | 繁體中文
 
+> 已由重新撰寫的 [check_webdiff](../check_webdiff/) 取代，新的部署請改用它。這支只維持現有版本。
+
 # check_diff_webhtml v1.1
 
 偵測網頁內容有沒有被改動：每次抓一次網址，與上一次抓到的內容比較字元數，不同就 CRITICAL。可用來發現首頁被置換、被植入內容這類異動。

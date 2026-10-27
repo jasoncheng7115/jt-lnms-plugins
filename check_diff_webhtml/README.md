@@ -1,5 +1,7 @@
 English | [繁體中文](README_zh-TW.md)
 
+> Superseded by the rewritten [check_webdiff](../check_webdiff/); use it for new deployments. This plugin is kept as is.
+
 # check_diff_webhtml v1.1
 
 Detects whether web page content has changed: each run fetches the URL once and compares the character count with the content fetched the previous time; if they differ, the result is CRITICAL. Useful for spotting changes such as a replaced home page or injected content.
