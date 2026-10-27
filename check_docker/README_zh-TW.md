@@ -1,6 +1,6 @@
 [English](README.md) | 繁體中文
 
-# check_docker_containers v1.0
+# check_docker v1.1
 
 NCPA 外掛（Python 3）：透過 Docker Engine API（`/var/run/docker.sock`）檢查容器狀態。不需要 `docker` 指令或額外套件，只用標準函式庫。
 
@@ -19,7 +19,7 @@ NCPA 外掛（Python 3）：透過 Docker Engine API（`/var/run/docker.sock`）
 ## 安裝
 
 ```bash
-sudo install -m 755 check_docker_containers.py /usr/local/ncpa/plugins/
+sudo install -m 755 check_docker.py /usr/local/ncpa/plugins/
 sudo usermod -aG docker nagios
 sudo systemctl restart ncpa     # 讓 nagios 的新群組生效
 ```
@@ -41,7 +41,7 @@ sudo systemctl restart ncpa     # 讓 nagios 的新群組生效
 Check Type 選 `ncpa`：
 
 ```text
--t 'your-token' -M 'plugins/check_docker_containers.py' -a "--require web,db,auth"
+-t 'your-token' -M 'plugins/check_docker.py' -a "--require web,db,auth"
 ```
 
 ## 輸出範例
@@ -56,6 +56,11 @@ WARNING - web 已重啟 7 次; 執行中 4/4 | running=4;;;0;4 problems=1;;;0
 
 - 容器名稱取 `Names` 的第一個
 - 每個容器各呼叫一次 inspect API，容器很多時注意 NCPA 的外掛逾時（預設 59 秒）
+
+## 版本紀錄
+
+- **v1.1**（2026/10/27）：改名為 `check_docker.py`（原名 `check_docker_containers.py`），功能不變。升級時把外掛目錄裡的舊檔移走，LibreNMS Parameters 的 `-M` 改成新檔名
+- **v1.0**（2026/10/24）
 
 ## 作者
 

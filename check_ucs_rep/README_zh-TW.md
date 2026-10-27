@@ -1,10 +1,10 @@
 [English](README.md) | 繁體中文
 
-# check_ucs_replication v1.0
+# check_ucs_rep v1.1
 
 NCPA 外掛（Python 3）：檢查 Univention Corporate Server（UCS）網域控制站的複寫狀態。
 
-- **UCS LDAP 複寫**：比較 Primary 的 notifier ID 與本機 listener 已處理的 ID。大量 LDAP 變更時短暫落後是正常的，所以用狀態檔 `/var/tmp/check_ucs_replication.state` 記錄 listener 卡住的起始時間，**落後而且多久沒有進度**超過門檻才告警；`failed.ldif` 有內容直接 CRITICAL
+- **UCS LDAP 複寫**：比較 Primary 的 notifier ID 與本機 listener 已處理的 ID。大量 LDAP 變更時短暫落後是正常的，所以用狀態檔 `/var/tmp/check_ucs_rep.state` 記錄 listener 卡住的起始時間，**落後而且多久沒有進度**超過門檻才告警；`failed.ldif` 有內容直接 CRITICAL
 - **Samba AD DRS 複寫**：`samba-tool drs showrepl --json` 的 repsFrom，看各分區的連續失敗次數
 
 ## 需求
@@ -15,8 +15,8 @@ NCPA 外掛（Python 3）：檢查 Univention Corporate Server（UCS）網域控
 ## 安裝
 
 ```bash
-sudo install -m 755 check_ucs_replication.py /usr/local/ncpa/plugins/
-sudo install -m 440 sudoers-ncpa-ucs-replication /etc/sudoers.d/ncpa-ucs-replication
+sudo install -m 755 check_ucs_rep.py /usr/local/ncpa/plugins/
+sudo install -m 440 sudoers-ncpa-ucs-rep /etc/sudoers.d/ncpa-ucs-rep
 sudo visudo -c
 ```
 
@@ -39,7 +39,7 @@ sudo visudo -c
 Check Type 選 `ncpa`：
 
 ```text
--t 'your-token' -M 'plugins/check_ucs_replication.py' -a "--lang zh-tw"
+-t 'your-token' -M 'plugins/check_ucs_rep.py' -a "--lang zh-tw"
 ```
 
 ## 輸出範例
@@ -49,6 +49,11 @@ OK - LDAP 複寫同步（1234/1234）; Samba DRS 正常（5 個分區） | ldap_
 WARNING - LDAP 落後 52 筆（1182/1234），已 12 分鐘沒有進度; Samba DRS 正常（5 個分區） | ldap_lag=52;;;0 drs_failures=0;1;3;0
 CRITICAL - LDAP 複寫同步（1234/1234）; Samba DRS DomainDnsZones 從 DC01 連續失敗 3 次（...） | ldap_lag=0;;;0 drs_failures=3;1;3;0
 ```
+
+## 版本紀錄
+
+- **v1.1**（2026/10/27）：改名為 `check_ucs_rep.py`（原名 `check_ucs_replication.py`），功能不變；狀態檔改名，第一次執行時會自動搬移舊檔。升級時把外掛目錄裡的舊檔移走，LibreNMS Parameters 的 `-M` 改成新檔名；已經建立的 sudoers 檔不用改
+- **v1.0**（2026/10/23）
 
 ## 作者
 

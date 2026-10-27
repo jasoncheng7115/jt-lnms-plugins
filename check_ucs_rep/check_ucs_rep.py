@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""UCS 網域控制站複寫狀態檢查（Nagios / NCPA 外掛）。
+"""check_ucs_rep - UCS 網域控制站複寫狀態檢查（Nagios / NCPA 外掛）。
 
-Version: 1.0
+Version: 1.1
 Author: Jason Cheng (Jason Tools) <jason@jason.tools>
 https://github.com/jasoncheng7115/jt-lnms-plugins
+
+1.0 (2026/10/23)  first release as check_ucs_replication.py
+1.1 (2026/10/27)  renamed to check_ucs_rep.py; state file renamed (the old one is moved on first run)
 
 同時檢查兩種複寫：
   1. UCS LDAP 複寫：Primary 的 notifier ID 與本機 listener 已處理的 ID 差距。
@@ -14,7 +17,7 @@ https://github.com/jasoncheng7115/jt-lnms-plugins
      看各分區的連續失敗次數與最後成功時間。
 
 用法：
-  check_ucs_replication.py [--lang zh-tw|en] [-w 分鐘] [-c 分鐘]
+  check_ucs_rep.py [--lang zh-tw|en] [-w 分鐘] [-c 分鐘]
                            [--drs-warn 次數] [--drs-crit 次數] [--no-drs]
 
   --lang       輸出語言，zh-tw（預設）或 en
@@ -35,7 +38,8 @@ import time
 GET_NOTIFIER_ID = "/usr/share/univention-directory-listener/get_notifier_id.py"
 LISTENER_ID_FILE = "/var/lib/univention-directory-listener/notifier_id"
 FAILED_LDIF = "/var/lib/univention-directory-replication/failed.ldif"
-STATE_FILE = "/var/tmp/check_ucs_replication.state"
+STATE_FILE = "/var/tmp/check_ucs_rep.state"
+OLD_STATE_FILE = "/var/tmp/check_ucs_replication.state"  # v1.0 name
 SAMBA_TOOL = "/usr/bin/samba-tool"
 
 OK, WARNING, CRITICAL, UNKNOWN = 0, 1, 2, 3
@@ -102,6 +106,11 @@ def check_ldap(args, t):
 
     # 狀態檔只記「開始落後的時間」；追上就清掉
     state = {}
+    if not os.path.exists(STATE_FILE) and os.path.exists(OLD_STATE_FILE):
+        try:
+            os.rename(OLD_STATE_FILE, STATE_FILE)
+        except OSError:
+            pass
     try:
         with open(STATE_FILE) as f:
             state = json.load(f)

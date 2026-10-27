@@ -1,6 +1,6 @@
 English | [繁體中文](README_zh-TW.md)
 
-# check_docker_containers v1.0
+# check_docker v1.1
 
 NCPA plugin (Python 3): checks container state through the Docker Engine API (`/var/run/docker.sock`). It needs no `docker` command or extra packages, only the standard library.
 
@@ -19,7 +19,7 @@ NCPA plugin (Python 3): checks container state through the Docker Engine API (`/
 ## Installation
 
 ```bash
-sudo install -m 755 check_docker_containers.py /usr/local/ncpa/plugins/
+sudo install -m 755 check_docker.py /usr/local/ncpa/plugins/
 sudo usermod -aG docker nagios
 sudo systemctl restart ncpa     # 讓 nagios 的新群組生效
 ```
@@ -41,7 +41,7 @@ Note: **membership in the docker group is equivalent to root**; anyone who can a
 Set Check Type to `ncpa`:
 
 ```text
--t 'your-token' -M 'plugins/check_docker_containers.py' -a "--require web,db,auth"
+-t 'your-token' -M 'plugins/check_docker.py' -a "--require web,db,auth"
 ```
 
 ## Sample output
@@ -56,6 +56,11 @@ WARNING - web 已重啟 7 次; 執行中 4/4 | running=4;;;0;4 problems=1;;;0
 
 - The container name is the first entry in `Names`
 - The inspect API is called once per container; with many containers, watch the NCPA plugin timeout (default 59 seconds)
+
+## Changelog
+
+- **v1.1** (2026/10/27): renamed to `check_docker.py` (was `check_docker_containers.py`), no functional change. When upgrading, move the old file out of the plugin folder and change `-M` in the LibreNMS Parameters to the new name
+- **v1.0** (2026/10/24)
 
 ## Author
 

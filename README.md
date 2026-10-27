@@ -11,8 +11,8 @@ A collection of self-developed LibreNMS / Nagios-compatible monitoring plugins. 
 | [check_ncpa_short](check_ncpa_short/) | v1.0 | LibreNMS server | bash | Wraps `check_ncpa` and keeps only the first line, so the long output of NCPA `logs` is not parsed as perfdata |
 | [check_files](check_files/) | v1.0 | Monitored host (NCPA) | Windows PowerShell | File/folder existence, min/max count, age of the newest file in hours |
 | [check_file_count](check_file_count/) | v1.0 | Monitored host (NCPA) | Windows CMD | CRITICAL if the folder contains any files (a pending queue that should be empty) |
-| [check_ucs_replication](check_ucs_replication/) | v1.0 | Monitored host (NCPA) | UCS, Python 3 | UCS LDAP replication progress + Samba AD DRS replication failure count |
-| [check_docker_containers](check_docker_containers/) | v1.0 | Monitored host (NCPA) | Linux, Python 3 | Container state based on restart policy and health check |
+| [check_ucs_rep](check_ucs_rep/) | v1.1 | Monitored host (NCPA) | UCS, Python 3 | UCS LDAP replication progress + Samba AD DRS replication failure count |
+| [check_docker](check_docker/) | v1.1 | Monitored host (NCPA) | Linux, Python 3 | Container state based on restart policy and health check |
 | [check_graylog_if](check_graylog_if/) | v1.2 | LibreNMS server | bash | Graylog indexing failures in the last 5 minutes |
 | [check_graylog_journal](check_graylog_journal/) | v1.1 | LibreNMS server | bash | Graylog Journal utilization |
 | [check_pmg_queue](check_pmg_queue/) | v1.0 | LibreNMS server | Python 3 | Postfix queue count on Proxmox Mail Gateway |

@@ -1,10 +1,10 @@
 English | [繁體中文](README_zh-TW.md)
 
-# check_ucs_replication v1.0
+# check_ucs_rep v1.1
 
 NCPA plugin (Python 3): checks the replication status of a Univention Corporate Server (UCS) domain controller.
 
-- **UCS LDAP replication**: compares the Primary's notifier ID with the ID the local listener has processed. Lagging briefly during large LDAP changes is normal, so the state file `/var/tmp/check_ucs_replication.state` records when the listener got stuck, and the plugin alerts only when it is **lagging and has made no progress** for longer than the threshold; a non-empty `failed.ldif` is CRITICAL immediately
+- **UCS LDAP replication**: compares the Primary's notifier ID with the ID the local listener has processed. Lagging briefly during large LDAP changes is normal, so the state file `/var/tmp/check_ucs_rep.state` records when the listener got stuck, and the plugin alerts only when it is **lagging and has made no progress** for longer than the threshold; a non-empty `failed.ldif` is CRITICAL immediately
 - **Samba AD DRS replication**: reads repsFrom from `samba-tool drs showrepl --json` and checks the consecutive failure count of each partition (naming context)
 
 ## Requirements
@@ -15,8 +15,8 @@ NCPA plugin (Python 3): checks the replication status of a Univention Corporate 
 ## Installation
 
 ```bash
-sudo install -m 755 check_ucs_replication.py /usr/local/ncpa/plugins/
-sudo install -m 440 sudoers-ncpa-ucs-replication /etc/sudoers.d/ncpa-ucs-replication
+sudo install -m 755 check_ucs_rep.py /usr/local/ncpa/plugins/
+sudo install -m 440 sudoers-ncpa-ucs-rep /etc/sudoers.d/ncpa-ucs-rep
 sudo visudo -c
 ```
 
@@ -39,7 +39,7 @@ On nodes without Samba AD, add `--no-drs`; the sudoers file is then not needed.
 Set Check Type to `ncpa`:
 
 ```text
--t 'your-token' -M 'plugins/check_ucs_replication.py' -a "--lang zh-tw"
+-t 'your-token' -M 'plugins/check_ucs_rep.py' -a "--lang zh-tw"
 ```
 
 ## Sample output
@@ -49,6 +49,11 @@ OK - LDAP 複寫同步（1234/1234）; Samba DRS 正常（5 個分區） | ldap_
 WARNING - LDAP 落後 52 筆（1182/1234），已 12 分鐘沒有進度; Samba DRS 正常（5 個分區） | ldap_lag=52;;;0 drs_failures=0;1;3;0
 CRITICAL - LDAP 複寫同步（1234/1234）; Samba DRS DomainDnsZones 從 DC01 連續失敗 3 次（...） | ldap_lag=0;;;0 drs_failures=3;1;3;0
 ```
+
+## Changelog
+
+- **v1.1** (2026/10/27): renamed to `check_ucs_rep.py` (was `check_ucs_replication.py`), no functional change; the state file is renamed and the old one is moved on the first run. When upgrading, move the old file out of the plugin folder and change `-M` in the LibreNMS Parameters; an existing sudoers file needs no change
+- **v1.0** (2026/10/23)
 
 ## Author
 

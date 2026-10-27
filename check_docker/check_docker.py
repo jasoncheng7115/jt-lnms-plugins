@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NCPA 外掛：透過 Docker Engine API（/var/run/docker.sock）檢查容器狀態。
+"""check_docker - NCPA 外掛：透過 Docker Engine API（/var/run/docker.sock）檢查容器狀態。
 
-Version: 1.0
+Version: 1.1
 Author: Jason Cheng (Jason Tools) <jason@jason.tools>
 https://github.com/jasoncheng7115/jt-lnms-plugins
+
+1.0 (2026/10/24)  first release as check_docker_containers.py
+1.1 (2026/10/27)  renamed to check_docker.py, no functional change
 
 判斷規則：
   - 重啟策略為 always / unless-stopped / on-failure 卻沒在跑 → CRITICAL
@@ -14,7 +17,7 @@ https://github.com/jasoncheng7115/jt-lnms-plugins
   - --require 指定的容器不存在 → CRITICAL
 
 用法：
-  check_docker_containers.py [--lang zh-tw|en] [--require a,b] [--exclude x,y] [--restart-warn N]
+  check_docker.py [--lang zh-tw|en] [--require a,b] [--exclude x,y] [--restart-warn N]
 """
 import argparse
 import http.client
