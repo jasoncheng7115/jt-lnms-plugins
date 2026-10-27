@@ -19,12 +19,13 @@ A collection of self-developed LibreNMS / Nagios-compatible monitoring plugins. 
 | [check_pve_cephosd](check_pve_cephosd/) | v1.1 | LibreNMS server | Python 3 | Ceph OSDs that are down on a Proxmox VE node |
 | [check_udp_nmap](check_udp_nmap/) | v1.1 | LibreNMS server | bash + nmap | Whether a UDP port is listening |
 | [check_diff_webhtml](check_diff_webhtml/) | v1.1 | LibreNMS server | bash | Whether web page content has changed |
+| [check_extip](check_extip/) | v1.0 | LibreNMS server | Python 3 | External IP change: majority vote across services, CIDR, DDNS host name, backup WAN, IPv6 (replaces check_ext_ip) |
 | [check_ollama](check_ollama/) | v1.0 | LibreNMS server | Python 3 | Ollama loaded models, VRAM, unload countdown |
 | [check_strata](check_strata/) | v1.0 | LibreNMS server | Python 3 | Strata LLM inference API status, queue length, performance of the last request |
 | [check_comfyui](check_comfyui/) | v1.0 | LibreNMS server | Python 3 | ComfyUI status, VRAM, queue length, last image |
 | [check_pyhs](check_pyhs/) | v1.1 | LibreNMS server | Python 3 | Per-outlet power usage of a TP-Link Kasa 6-outlet smart power strip |
 
-check_graylog_*, check_pmg_queue, check_pve_cephosd, check_udp_nmap and check_diff_webhtml were originally hosted at https://github.com/jasoncheng7115/it-scripts/tree/master/nagios_plugons .
+check_graylog_*, check_pmg_queue, check_pve_cephosd, check_udp_nmap and check_diff_webhtml were originally hosted at https://github.com/jasoncheng7115/it-scripts/tree/master/nagios_plugons ; check_ext_ip from the same folder is replaced by the rewritten check_extip.
 
 Related articles:
 

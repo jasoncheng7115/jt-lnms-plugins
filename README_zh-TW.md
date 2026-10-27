@@ -19,12 +19,13 @@
 | [check_pve_cephosd](check_pve_cephosd/) | v1.1 | LibreNMS 主機 | Python 3 | Proxmox VE 節點上 down 的 Ceph OSD |
 | [check_udp_nmap](check_udp_nmap/) | v1.1 | LibreNMS 主機 | bash＋nmap | UDP 連接埠是否在聽 |
 | [check_diff_webhtml](check_diff_webhtml/) | v1.1 | LibreNMS 主機 | bash | 網頁內容是否被改動 |
+| [check_extip](check_extip/) | v1.0 | LibreNMS 主機 | Python 3 | 對外 IP 是否變更：多個服務投票、CIDR、DDNS 主機名稱、備援線路、IPv6（取代 check_ext_ip） |
 | [check_ollama](check_ollama/) | v1.0 | LibreNMS 主機 | Python 3 | Ollama 已載入的模型、VRAM、卸載倒數 |
 | [check_strata](check_strata/) | v1.0 | LibreNMS 主機 | Python 3 | Strata LLM 推論 API 狀態、排隊數、上一筆請求效能 |
 | [check_comfyui](check_comfyui/) | v1.0 | LibreNMS 主機 | Python 3 | ComfyUI 狀態、VRAM、排隊數、上一張圖 |
 | [check_pyhs](check_pyhs/) | v1.1 | LibreNMS 主機 | Python 3 | TP-Link Kasa 6 孔智慧延長線各插座用電 |
 
-check_graylog_*、check_pmg_queue、check_pve_cephosd、check_udp_nmap、check_diff_webhtml 原本放在 https://github.com/jasoncheng7115/it-scripts/tree/master/nagios_plugons 。
+check_graylog_*、check_pmg_queue、check_pve_cephosd、check_udp_nmap、check_diff_webhtml 原本放在 https://github.com/jasoncheng7115/it-scripts/tree/master/nagios_plugons ；同一處的 check_ext_ip 由重新撰寫的 check_extip 取代。
 
 相關文章：
 

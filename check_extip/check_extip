@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""check_extip - LibreNMS/Nagios check of the external (WAN) IP address.
+
+Version: 1.0
+Author: Jason Cheng (Jason Tools) <jason@jason.tools>
+https://github.com/jasoncheng7115/jt-lnms-plugins
+
+Asks several public "what is my IP" services in parallel and compares the
+majority answer with the expected address. Command line compatible with
+check_ext_ip v1.5 (-H -S -t -l -v -V -h); everything else is new.
+
+Expected address (-H) may be:
+  an IP                  203.0.113.10
+  a list                 203.0.113.10,203.0.113.11   (any of them is OK)
+  a CIDR                 203.0.113.8/29
+  a host name            home.example.com            (its A/AAAA records: checks that DDNS is up to date)
+
+Exit: 0 OK / 1 WARNING / 2 CRITICAL / 3 UNKNOWN
+"""
+
+import argparse
+import concurrent.futures
+import http.client
+import ipaddress
+import random
+import socket
+import ssl
+import sys
+import time
+import urllib.parse
+
+VERSION = '1.0'
+OK, WARNING, CRITICAL, UNKNOWN = 0, 1, 2, 3
+STATE = {OK: 'OK', WARNING: 'WARNING', CRITICAL: 'CRITICAL', UNKNOWN: 'UNKNOWN'}
+
+# name: (IPv4 URL, IPv6 URL). All return the bare address as plain text, free, no API key.
+# The same URL in both columns means a dual-stack service; the address family is forced on connect.
+PROVIDERS = {
+    'amazonaws':  ('https://checkip.amazonaws.com', None),
+    'dnsomatic':  ('https://myip.dnsomatic.com', None),
+    'icanhazip':  ('https://ipv4.icanhazip.com', 'https://ipv6.icanhazip.com'),
+    'ident':      ('https://v4.ident.me', 'https://v6.ident.me'),
+    'ifconfigco': ('https://ifconfig.co/ip', 'https://ifconfig.co/ip'),
+    'ifconfigme': ('https://ifconfig.me/ip', 'https://ifconfig.me/ip'),
+    'ipecho':     ('https://ipecho.net/plain', None),
+    'ipify':      ('https://api.ipify.org', 'https://api6.ipify.org'),
+    'ipinfo':     ('https://ipinfo.io/ip', 'https://v6.ipinfo.io/ip'),
+    'ipme':       ('https://ip.me', 'https://ip.me'),
+    'seeip':      ('https://ipv4.seeip.org', 'https://ipv6.seeip.org'),
+    'wtfismyip':  ('https://ipv4.wtfismyip.com/text', 'https://ipv6.wtfismyip.com/text'),
+}
+AUTO_PICK = 3
+USER_AGENT = 'curl/8.5.0 (check_extip/%s)' % VERSION   # some services return HTML to browser-like agents
+MAX_BODY = 256
+
+MSG = {
+    'en': {
+        'match': 'External IP %s is as expected',
+        'match_dns': 'External IP %s matches %s',
+        'backup': 'External IP %s is a backup WAN address (failover active?)',
+        'changed': 'External IP changed to %s, expected %s',
+        'changed_dns': 'External IP %s does not match %s (%s), DDNS not updated?',
+        'agree': '%d/%d providers agree',
+        'disagree': 'providers disagree: %s',
+        'noquorum': 'No quorum: %s (need %d matching answers)',
+        'allfail': 'All providers failed (tried: %s). Could not determine external IP',
+        'notglobal': 'Providers report %s, which is not a public address',
+        'resolve': 'Cannot resolve %s: %s',
+        'badexp': '%s is not a valid IP, CIDR or host name',
+        'noexp': 'Expected IP address not provided!',
+        'noprov': 'No usable providers for %s',
+        'unknownprov': 'unknown provider %s skipped',
+    },
+    'zh-tw': {
+        'match': '對外 IP %s 與預期相同',
+        'match_dns': '對外 IP %s 與 %s 相符',
+        'backup': '對外 IP %s 是備援線路的位址（可能已切換備援）',
+        'changed': '對外 IP 已變更為 %s，預期為 %s',
+        'changed_dns': '對外 IP %s 與 %s（%s）不符，DDNS 可能沒有更新',
+        'agree': '%d/%d 個服務一致',
+        'disagree': '各服務結果不同：%s',
+        'noquorum': '結果不足以判斷：%s（需要 %d 個相同結果）',
+        'allfail': '所有服務都查詢失敗（%s），無法取得對外 IP',
+        'notglobal': '查到的位址 %s 不是公開 IP',
+        'resolve': '無法解析 %s：%s',
+        'badexp': '%s 不是有效的 IP、CIDR 或主機名稱',
+        'noexp': '沒有指定預期的 IP（-H）',
+        'noprov': '沒有可用於 %s 的服務',
+        'unknownprov': '略過不存在的服務 %s',
+    },
+}
+
+
+class FamilyHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection that only uses addresses of one family (like curl -4 / -6)."""
+
+    def __init__(self, host, family, **kw):
+        super().__init__(host, **kw)
+        self._family = family
+
+    def connect(self):
+        err = None
+        for af, st, proto, _, sa in socket.getaddrinfo(self.host, self.port, self._family, socket.SOCK_STREAM):
+            sock = socket.socket(af, st, proto)
+            sock.settimeout(self.timeout)
+            try:
+                sock.connect(sa)
+            except OSError as e:
+                err = e
+                sock.close()
+                continue
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+            return
+        raise err or OSError('no %s address' % ('IPv6' if self._family == socket.AF_INET6 else 'IPv4'))
+
+
+def fetch(name, url, family, timeout):
+    """Return (name, ip or None, seconds, error)."""
+    start = time.monotonic()
+    try:
+        u = urllib.parse.urlsplit(url)
+        if u.scheme != 'https':
+            raise ValueError('only https is allowed')
+        conn = FamilyHTTPSConnection(u.hostname, family, port=u.port or 443, timeout=timeout,
+                                     context=ssl.create_default_context())
+        conn.request('GET', (u.path or '/') + ('?' + u.query if u.query else ''),
+                     headers={'User-Agent': USER_AGENT, 'Accept': 'text/plain'})
+        r = conn.getresponse()
+        body = r.read(MAX_BODY + 1)
+        conn.close()
+        if r.status != 200:
+            raise ValueError('HTTP %d' % r.status)
+        if len(body) > MAX_BODY:
+            raise ValueError('reply too long')
+        ip = ipaddress.ip_address(body.decode('ascii', 'replace').strip())
+        want = 6 if family == socket.AF_INET6 else 4
+        if ip.version != want:
+            raise ValueError('got IPv%d' % ip.version)
+        return name, ip, time.monotonic() - start, None
+    except Exception as e:  # noqa: BLE001 - any failure just means this provider is skipped
+        return name, None, time.monotonic() - start, str(e) or type(e).__name__
+
+
+def parse_expected(text, family, t):
+    """Return (list of ip_network, label for messages or None, error)."""
+    nets, label = [], None
+    for item in [x.strip() for x in text.split(',') if x.strip()]:
+        try:
+            nets.append(ipaddress.ip_network(item, strict=False))
+            continue
+        except ValueError:
+            pass
+        # Digits/dots/colons only means a mistyped address, not a host name
+        if all(c.isdigit() or c in '.:/' for c in item) or \
+                not all(c.isalnum() or c in '-.' for c in item) or '.' not in item:
+            return None, None, t['badexp'] % item
+        try:
+            infos = socket.getaddrinfo(item, None, family, socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            return None, None, t['resolve'] % (item, e.strerror or e)
+        addrs = sorted({i[4][0] for i in infos})
+        nets.extend(ipaddress.ip_network(a) for a in addrs)
+        label = '%s (%s)' % (item, ', '.join(addrs))
+    return nets, label, None
+
+
+def main():
+    p = argparse.ArgumentParser(add_help=False, description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('-H', dest='expected', help='expected IP, list, CIDR or host name (required)')
+    p.add_argument('-W', dest='backup', help='backup WAN IP(s)/CIDR: WARNING instead of CRITICAL')
+    p.add_argument('-S', dest='providers', help='comma-separated providers (default: %d random ones)' % AUTO_PICK)
+    p.add_argument('-U', dest='urls', action='append', default=[], help='extra provider URL (https, plain-text reply); repeatable')
+    p.add_argument('-n', dest='count', type=int, default=AUTO_PICK, help='providers to ask when -S is not given (default %d)' % AUTO_PICK)
+    p.add_argument('-q', dest='quorum', type=int, help='matching answers required (default 2; 1 when -S lists one or two providers)')
+    p.add_argument('-t', dest='timeout', type=float, default=5, help='timeout per provider in seconds (default 5)')
+    p.add_argument('-6', dest='ipv6', action='store_true', help='check the IPv6 address instead of IPv4')
+    p.add_argument('-l', dest='list', action='store_true', help='list providers')
+    p.add_argument('-v', dest='verbose', action='store_true', help='show every provider answer')
+    p.add_argument('--lang', choices=['en', 'zh-tw'], default='en', help='output language (default en)')
+    p.add_argument('-V', dest='version', action='store_true', help='show version')
+    p.add_argument('-h', '--help', action='help', help='show this help')
+    try:
+        a = p.parse_args()
+    except SystemExit as e:
+        sys.exit(OK if e.code == 0 else UNKNOWN)
+    t = MSG[a.lang]
+    fam = socket.AF_INET6 if a.ipv6 else socket.AF_INET
+    col = 1 if a.ipv6 else 0
+
+    if a.version:
+        print('check_extip v%s' % VERSION)
+        return OK
+    if a.list:
+        print('%-12s %-36s %s' % ('NAME', 'IPv4', 'IPv6'))
+        for n, (v4, v6) in sorted(PROVIDERS.items()):
+            print('%-12s %-36s %s' % (n, v4 or '-', v6 or '-'))
+        return OK
+    if not a.expected:
+        print('UNKNOWN - ' + t['noexp'])
+        return UNKNOWN
+
+    expected, exp_label, err = parse_expected(a.expected, fam, t)
+    if err:
+        print('UNKNOWN - ' + err)
+        return UNKNOWN
+    backup = []
+    if a.backup:
+        backup, _, err = parse_expected(a.backup, fam, t)
+        if err:
+            print('UNKNOWN - ' + err)
+            return UNKNOWN
+
+    # Provider list: -S in the given order (all of them are asked), otherwise a random pick;
+    # the rest stay as reserves for a second round when the first one gives no quorum.
+    notes = []
+    if a.providers:
+        names = [x.strip().lower() for x in a.providers.split(',') if x.strip()]
+        for n in [n for n in names if n not in PROVIDERS]:
+            notes.append(t['unknownprov'] % n)
+        first = [(n, PROVIDERS[n][col]) for n in names if n in PROVIDERS and PROVIDERS[n][col]]
+        reserve = []
+    else:
+        pool = [(n, u[col]) for n, u in PROVIDERS.items() if u[col]]
+        random.shuffle(pool)
+        first, reserve = pool[:max(1, a.count)], pool[max(1, a.count):]
+    first += [(urllib.parse.urlsplit(u).hostname or u, u) for u in a.urls]
+    if not first:
+        print('UNKNOWN - ' + t['noprov'] % ('IPv6' if a.ipv6 else 'IPv4'))
+        return UNKNOWN
+    # Default quorum 2; with -S listing only one or two providers there are no reserves,
+    # so one answer is enough (the v1.5 behaviour)
+    quorum = a.quorum if a.quorum else (1 if a.providers and len(first) <= 2 else 2)
+
+    # At most one extra round, and only when someone answered: if nobody did, the
+    # network is probably down and asking more services would only add timeouts.
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(first) + len(reserve)) as ex:
+        results += list(ex.map(lambda nu: fetch(nu[0], nu[1], fam, a.timeout), first))
+        good = [r for r in results if r[1]]
+        top = max((sum(1 for g in good if g[1] == ip) for ip in {g[1] for g in good}), default=0)
+        need = quorum - top
+        if good and need > 0 and reserve:
+            results += list(ex.map(lambda nu: fetch(nu[0], nu[1], fam, a.timeout), reserve[:need + 1]))
+
+    good = [r for r in results if r[1]]
+    tried = ', '.join(r[0] for r in results)
+    votes = {}
+    for r in good:
+        votes.setdefault(r[1], []).append(r[0])
+    perf = ['match=%d;;;0;1', "providers=%d;;;0" % len(results), "answered=%d;;;0" % len(good)]
+    elapsed = max((r[2] for r in results), default=0)
+
+    detail = []
+    if a.verbose:
+        for name, ip, sec, err in results:
+            detail.append('%s: %s (%.2fs)' % (name, ip if ip else 'failed - ' + err, sec))
+
+    def finish(code, text, match):
+        line = '%s - %s' % (STATE[code], text)
+        if notes:
+            line += ' (' + '; '.join(notes) + ')'
+        pd = ' '.join([perf[0] % match] + perf[1:] + ['agree=%d;;;0' % agree, 'time=%.3fs;;;0' % elapsed])
+        line = line.replace('|', '/')
+        if detail:
+            print(line)
+            for d in detail:
+                print(d.replace('|', '/'))
+            print('| ' + pd)
+        else:
+            print(line + ' | ' + pd)
+        return code
+
+    agree = 0
+    if not good:
+        return finish(UNKNOWN, t['allfail'] % tried, 0)
+
+    ranked = sorted(votes.items(), key=lambda kv: -len(kv[1]))
+    actual, who = ranked[0]
+    agree = len(who)
+    summary = t['agree'] % (agree, len(good)) + ': ' + ', '.join(who)
+    if len(ranked) > 1:
+        summary += '; ' + t['disagree'] % '; '.join('%s = %s' % (ip, ','.join(n)) for ip, n in ranked)
+    if agree < quorum or (len(ranked) > 1 and len(ranked[1][1]) == agree):
+        return finish(UNKNOWN, t['noquorum'] % (summary, quorum), 0)
+    if not actual.is_global:
+        return finish(UNKNOWN, t['notglobal'] % actual, 0)
+
+    via = ' (%s)' % summary
+    if any(actual in n for n in expected):
+        msg = (t['match_dns'] % (actual, exp_label)) if exp_label else (t['match'] % actual)
+        return finish(OK, msg + via, 1)
+    if any(actual in n for n in backup):
+        return finish(WARNING, t['backup'] % actual + via, 0)
+    if exp_label:
+        host = a.expected.split(',')[0].strip()
+        return finish(CRITICAL, t['changed_dns'] % (actual, host, exp_label.split('(', 1)[1].rstrip(')')) + via, 0)
+    return finish(CRITICAL, t['changed'] % (actual, a.expected) + via, 0)
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as e:  # never let a traceback reach the monitoring system
+        print('UNKNOWN - %s: %s' % (type(e).__name__, e))
+        sys.exit(UNKNOWN)
