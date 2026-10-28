@@ -1,6 +1,6 @@
 [English](README.md) | 繁體中文
 
-# check_docker v1.1
+# check_docker v1.2
 
 NCPA 外掛（Python 3）：透過 Docker Engine API（`/var/run/docker.sock`）檢查容器狀態。不需要 `docker` 指令或額外套件，只用標準函式庫。
 
@@ -49,7 +49,7 @@ Check Type 選 `ncpa`：
 ```text
 OK - 容器全部正常（執行中 4）; 略過已停用 web-old | running=4;;;0;4 problems=0;;;0
 CRITICAL - db 沒在執行（exited）; auth 不存在; 執行中 2/4 | running=2;;;0;4 problems=2;;;0
-WARNING - web 已重啟 7 次; 執行中 4/4 | running=4;;;0;4 problems=1;;;0
+WARNING - web 已重新啟動 7 次; 執行中 4/4 | running=4;;;0;4 problems=1;;;0
 ```
 
 ## 限制
@@ -59,6 +59,7 @@ WARNING - web 已重啟 7 次; 執行中 4/4 | running=4;;;0;4 problems=1;;;0
 
 ## 版本紀錄
 
+- **v1.2**（2026/10/28）：中文訊息用詞統一為「重新啟動」
 - **v1.1**（2026/10/27）：改名為 `check_docker.py`（原名 `check_docker_containers.py`），功能不變。升級時把外掛目錄裡的舊檔移走，LibreNMS Parameters 的 `-M` 改成新檔名
 - **v1.0**（2026/10/24）
 

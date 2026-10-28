@@ -2,18 +2,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """check_docker - NCPA 外掛：透過 Docker Engine API（/var/run/docker.sock）檢查容器狀態。
 
-Version: 1.1
+Version: 1.2
 Author: Jason Cheng (Jason Tools) <jason@jason.tools>
 https://github.com/jasoncheng7115/jt-lnms-plugins
 
 1.0 (2026/10/24)  first release as check_docker_containers.py
 1.1 (2026/10/27)  renamed to check_docker.py, no functional change
+1.2 (2026/10/28)  zh-tw wording: use 重新啟動
 
 判斷規則：
-  - 重啟策略為 always / unless-stopped / on-failure 卻沒在跑 → CRITICAL
-  - 重啟策略為 no 且已停止 → 視為刻意停用，略過（例如保留回復用的舊容器）
+  - 重新啟動政策為 always / unless-stopped / on-failure 卻沒在跑 → CRITICAL
+  - 重新啟動政策為 no 且已停止 → 視為手動停用，略過（例如保留回復用的舊容器）
   - 健康檢查 unhealthy → CRITICAL；starting → WARNING
-  - 正在 restarting，或重啟次數 ≥ --restart-warn → WARNING
+  - 正在 restarting，或重新啟動次數 ≥ --restart-warn → WARNING
   - --require 指定的容器不存在 → CRITICAL
 
 用法：
@@ -35,8 +36,8 @@ MSG = {
         "down": "{} 沒在執行（{}）",
         "unhealthy": "{} 健康檢查失敗",
         "starting": "{} 健康檢查啟動中",
-        "restarting": "{} 正在反覆重啟",
-        "restarts": "{} 已重啟 {} 次",
+        "restarting": "{} 正在反覆重新啟動",
+        "restarts": "{} 已重新啟動 {} 次",
         "ok": "容器全部正常（執行中 {}）",
         "skipped": "略過已停用 {}",
         "running": "執行中 {}/{}",

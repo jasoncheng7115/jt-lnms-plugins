@@ -12,7 +12,7 @@
 | [check_files](check_files/) | v1.0 | 受監測主機（NCPA） | Windows PowerShell | 檔案/資料夾是否存在、數量上下限、最新檔案的時數 |
 | [check_file_count](check_file_count/) | v1.0 | 受監測主機（NCPA） | Windows CMD | 資料夾內有檔案就 CRITICAL（待處理佇列應為空） |
 | [check_ucs_rep](check_ucs_rep/) | v1.1 | 受監測主機（NCPA） | UCS，Python 3 | UCS LDAP 複寫進度＋Samba AD DRS 複寫失敗次數 |
-| [check_docker](check_docker/) | v1.1 | 受監測主機（NCPA） | Linux，Python 3 | 依重新啟動政策與健康檢查判斷容器狀態 |
+| [check_docker](check_docker/) | v1.2 | 受監測主機（NCPA） | Linux，Python 3 | 依重新啟動政策與健康檢查判斷容器狀態 |
 | [check_graylog_if](check_graylog_if/) | v1.2 | LibreNMS 主機 | bash | Graylog 最近 5 分鐘的索引失敗 |
 | [check_graylog_journal](check_graylog_journal/) | v1.1 | LibreNMS 主機 | bash | Graylog Journal 使用率 |
 | [check_pmg_queue](check_pmg_queue/) | v1.0 | LibreNMS 主機 | Python 3 | Proxmox Mail Gateway 的 Postfix 佇列筆數 |
@@ -40,7 +40,7 @@ check_graylog_*、check_pmg_queue、check_pve_cephosd、check_udp_nmap、check_d
 - **NCPA 外掛目錄**：Linux `/usr/local/ncpa/plugins/`、Windows `C:\Program Files\Nagios\NCPA\plugins\`。NCPA 依副檔名決定執行方式（`.py` 用系統的 `python3`、`.ps1` 用 `powershell -ExecutionPolicy Bypass -File`），外掛逾時預設 59 秒（`plugin_timeout`）
 - **NCPA 的執行身分**：Linux 是 `nagios`（`ncpa.cfg` 的 `[general]` `uid/gid`），Windows 是 LocalSystem。需要 root 的指令用 sudoers 只開放那一行，外掛內部 `sudo -n` 呼叫，不要用 `run_with_sudo` 讓整支外掛取得 root
 - **LibreNMS 端**呼叫 NCPA 外掛：Check Type 選 `ncpa`，Parameters 寫 `-t 'your-token' -M 'plugins/<檔名>' -a '<外掛參數>'`，不要寫 `-H`（LibreNMS 會自己帶）
-- **LibreNMS 主機上的外掛**放 `/usr/lib/nagios/plugins/`，檔名要以 `check_` 開頭，Check Type 會顯示成去掉前綴的名稱
+- **LibreNMS 主機上的外掛**放 `/usr/lib/nagios/plugins/`，檔名要以 `check_` 開頭，Check Type 會顯示成去掉 `check_` 的名稱
 - 有語系的外掛提供 `--lang zh-tw|en`，預設 zh-tw
 
 ## 新增外掛

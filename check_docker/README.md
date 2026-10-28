@@ -1,6 +1,6 @@
 English | [繁體中文](README_zh-TW.md)
 
-# check_docker v1.1
+# check_docker v1.2
 
 NCPA plugin (Python 3): checks container state through the Docker Engine API (`/var/run/docker.sock`). It needs no `docker` command or extra packages, only the standard library.
 
@@ -49,7 +49,7 @@ Set Check Type to `ncpa`:
 ```text
 OK - 容器全部正常（執行中 4）; 略過已停用 web-old | running=4;;;0;4 problems=0;;;0
 CRITICAL - db 沒在執行（exited）; auth 不存在; 執行中 2/4 | running=2;;;0;4 problems=2;;;0
-WARNING - web 已重啟 7 次; 執行中 4/4 | running=4;;;0;4 problems=1;;;0
+WARNING - web 已重新啟動 7 次; 執行中 4/4 | running=4;;;0;4 problems=1;;;0
 ```
 
 ## Limitations
@@ -59,6 +59,7 @@ WARNING - web 已重啟 7 次; 執行中 4/4 | running=4;;;0;4 problems=1;;;0
 
 ## Changelog
 
+- **v1.2** (2026/10/28): zh-tw messages use the term 重新啟動 (restart)
 - **v1.1** (2026/10/27): renamed to `check_docker.py` (was `check_docker_containers.py`), no functional change. When upgrading, move the old file out of the plugin folder and change `-M` in the LibreNMS Parameters to the new name
 - **v1.0** (2026/10/24)
 
