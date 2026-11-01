@@ -52,7 +52,7 @@ OK: 161/udp is listening.
 OK: 514/udp is listening or filtered (nmap: open/filtered, no reply).
 CRITICAL: 514/udp is not listening (closed).
 CRITICAL: 161/udp did not reply (nmap: open/filtered).
-UNKNOWN: No result for 161/udp on 192.168.1.30 (host down or timed out).
+UNKNOWN: No result for 161/udp on 192.0.2.30 (host down or timed out).
 ```
 
 ## Changelog

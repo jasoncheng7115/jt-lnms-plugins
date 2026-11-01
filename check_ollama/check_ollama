@@ -22,7 +22,7 @@ it joins every stdout line with "\n" and then splits on the FIRST "|", so all
 human-readable detail must precede the perfdata block, which is emitted last.
 
 Usage:
-    check_ollama -H 192.168.1.40 [-p 11434] [-l zh-tw|en] [-w GB] [-c GB]
+    check_ollama -H 192.0.2.10 [-p 11434] [-l zh-tw|en] [-w GB] [-c GB]
                  [--min-models N] [--expiring SECONDS] [-t 10]
 
 Thresholds (all optional):

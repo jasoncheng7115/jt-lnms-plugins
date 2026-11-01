@@ -39,7 +39,7 @@
 ```text
 OK - Plug 2 (NAS) |voltage_mv=110512 current_ma=812 power_mw=85230;;230000.0 total_wh=15320
 CRITICAL - Plug 2 (NAS) - Alert on: power_mw=231200 |voltage_mv=110230 current_ma=2105 power_mw=231200;;230000.0 total_wh=15322
-CRITICAL - Cannot connect to 192.168.1.30
+CRITICAL - Cannot connect to 192.0.2.30
 ```
 
 不給 `--plug` 時，第一行是總結、每個插座一行狀態，效能資料集中在最後一行，欄位名稱加上 `plug<編號>_` 前置字串：

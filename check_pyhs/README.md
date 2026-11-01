@@ -39,7 +39,7 @@ The example above is CRITICAL when outlet 2 reaches 230 W.
 ```text
 OK - Plug 2 (NAS) |voltage_mv=110512 current_ma=812 power_mw=85230;;230000.0 total_wh=15320
 CRITICAL - Plug 2 (NAS) - Alert on: power_mw=231200 |voltage_mv=110230 current_ma=2105 power_mw=231200;;230000.0 total_wh=15322
-CRITICAL - Cannot connect to 192.168.1.30
+CRITICAL - Cannot connect to 192.0.2.30
 ```
 
 Without `--plug`, the first line is a summary, each outlet gets one status line, and the perfdata is printed once on the last line with a `plug<number>_` prefix:
