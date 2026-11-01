@@ -25,6 +25,7 @@ A collection of self-developed LibreNMS / Nagios-compatible monitoring plugins. 
 | [check_strata](check_strata/) | v1.0 | LibreNMS server | Python 3 | Strata LLM inference API status, queue length, performance of the last request |
 | [check_comfyui](check_comfyui/) | v1.1 | LibreNMS server | Python 3 | ComfyUI status, models in use, VRAM, queue length, last image |
 | [check_pyhs](check_pyhs/) | v1.1 | LibreNMS server | Python 3 | Per-outlet power usage of a TP-Link Kasa 6-outlet smart power strip |
+| [check_nextcloud](check_nextcloud/) | v1.0 | LibreNMS server | Python 3 | Nextcloud status, updates, free space, shares, active users, OPcache/APCu, host load, database, setup checks (replaces check_nextcloud.py) |
 
 check_graylog_*, check_pmg_queue, check_pve_cephosd, check_udp_nmap and check_diff_webhtml were originally hosted at https://github.com/jasoncheng7115/it-scripts/tree/master/nagios_plugons ; check_ext_ip from the same folder is replaced by the rewritten check_extip.
 

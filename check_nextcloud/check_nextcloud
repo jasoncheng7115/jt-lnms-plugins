@@ -1,0 +1,582 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""
+check_nextcloud - LibreNMS/Nagios service check for a Nextcloud server
+
+Language: -l zh-tw|en (default zh-tw).
+
+One plugin, one aspect per service (-C):
+    status    status.php: installed, maintenance mode, pending DB upgrade
+              (no login needed)
+    updates   Nextcloud core and app updates
+    storage   free space of the data directory, users, files
+    shares    share counts, public links without a password
+    users     active users (5 min / 1 h / 24 h / 7 days)
+    php       OPcache (enabled, full, hit rate, wasted memory, interned
+              strings) and APCu memory
+    system    load per CPU and memory of the Nextcloud host
+    database  database type, version and size
+    setup     the admin overview's setup checks (cron last run, missing
+              indices, security warnings, log errors ...); cached
+
+Everything except status reads the serverinfo API
+(/ocs/v2.php/apps/serverinfo/api/v1/info) and needs an admin account, or a
+serverinfo token (--nc-token). setup needs an admin account.
+
+Replaces check_nextcloud.py (BornToBeRoot), whose "apps" check crashes on
+Nextcloud 28+ because serverinfo skips the app list unless asked for it.
+
+Version: 1.0
+Author: Jason Cheng (Jason Tools) <jason@jason.tools>
+https://github.com/jasoncheng7115/jt-lnms-plugins
+License: AGPL-3.0-or-later
+
+LibreNMS invokes this as:
+    <nagios_plugins>/check_nextcloud -H <service_ip|hostname> <service_param>
+
+Usage:
+    check_nextcloud -H cloud.example.com -C status|updates|storage|shares|
+                    users|php|system|database|setup
+                    [-P 443] [--http] [-k] [-u USER] [-a AUTH_FILE]
+                    [--password PASS] [--nc-token TOKEN] [-t 30] [-l zh-tw|en]
+
+Credentials, in order of precedence: --password, --auth-file (one line
+"user:password", readable only by the LibreNMS user), environment variable
+NEXTCLOUD_PASSWORD. Prefer --auth-file: service parameters are shown in the
+LibreNMS web UI and in the process list.
+
+Exit: 0 OK / 1 WARNING / 2 CRITICAL / 3 UNKNOWN
+"""
+
+import argparse
+import base64
+import json
+import os
+import socket
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+OK, WARNING, CRITICAL, UNKNOWN = 0, 1, 2, 3
+STATE = {OK: 'OK', WARNING: 'WARNING', CRITICAL: 'CRITICAL', UNKNOWN: 'UNKNOWN'}
+
+LANG = 'zh-tw'
+TRANSLATIONS = {
+ '無法連線': 'cannot connect',
+ '回傳非 JSON': 'returned non-JSON data',
+ '帳號或密碼錯誤，或帳號不是管理員': 'wrong user/password, or the user is not an admin',
+ '缺少帳號密碼（-u 搭配 -a / --password / NEXTCLOUD_PASSWORD）':
+     'credentials missing (-u with -a / --password / NEXTCLOUD_PASSWORD)',
+ '讀不到認證檔': 'cannot read auth file',
+ 'serverinfo API 回應異常': 'unexpected serverinfo API response',
+ '未安裝完成': 'not installed',
+ '維護模式中': 'in maintenance mode',
+ '需要資料庫升級': 'database upgrade pending',
+ '正常運作': 'running normally',
+ '核心可更新到 %s': 'core update to %s available',
+ '%d 個 app 可更新': '%d app updates available',
+ '核心與 app 都是最新版': 'core and apps are up to date',
+ '已安裝 %d 個 app': '%d apps installed',
+ '剩餘空間 %s': 'free space %s',
+ '使用者 %d（停用 %d）· 檔案 %s': 'users %d (disabled %d) · files %s',
+ '分享 %d · 公開連結 %d（無密碼 %d）': 'shares %d · public links %d (no password %d)',
+ '使用者 %d · 其他 %d · 群組 %d · 聊天室 %d · 聯邦 送出 %d／接收 %d':
+     'user %d · other %d · group %d · room %d · federated sent %d / received %d',
+ '無密碼公開連結 %d 個 >= %d': '%d public links without password >= %d',
+ '活躍使用者 5 分 %d · 1 小時 %d · 24 小時 %d · 7 天 %d':
+     'active users 5 min %d · 1 h %d · 24 h %d · 7 days %d',
+ '帳號 %d（停用 %d）': 'accounts %d (disabled %d)',
+ 'OPcache 未啟用': 'OPcache disabled',
+ 'OPcache 已滿': 'OPcache full',
+ 'OPcache 命中率 %.1f%% < %g%%': 'OPcache hit rate %.1f%% < %g%%',
+ 'OPcache 浪費 %.1f%% > %g%%': 'OPcache wasted %.1f%% > %g%%',
+ 'interned strings 剩 %.1f%%': 'interned strings %.1f%% free',
+ 'APCu 剩 %.1f%%': 'APCu %.1f%% free',
+ 'OPcache 命中率 %.2f%% · 使用 %.0f%% · 浪費 %.1f%%': 'OPcache hit %.2f%% · used %.0f%% · wasted %.1f%%',
+ 'APCu 使用 %.0f%% · 命中率 %.1f%%': 'APCu used %.0f%% · hit %.1f%%',
+ '每顆 CPU 負載 %.2f >= %g': 'load per CPU %.2f >= %g',
+ '記憶體使用 %.0f%% >= %g%%': 'memory used %.0f%% >= %g%%',
+ '負載 %.2f / %.2f / %.2f（%d CPU）': 'load %.2f / %.2f / %.2f (%d CPUs)',
+ '記憶體 %s / %s（%.0f%%）': 'memory %s / %s (%.0f%%)',
+ '資料庫大小 %s >= %g GB': 'database size %s >= %g GB',
+ '%d 個錯誤、%d 個警告': '%d errors, %d warnings',
+ '設定檢查全部通過': 'all setup checks passed',
+ '（已忽略 %d 項）': ' (%d ignored)',
+ '（快取 %d 分鐘前）': ' (cached %d min ago)',
+ '錯誤': 'error', '警告': 'warning',
+}
+def tr(text):
+    return TRANSLATIONS.get(text, text) if LANG == 'en' else text
+
+GB = 1024 ** 3
+SERVERINFO = '/ocs/v2.php/apps/serverinfo/api/v1/info?format=json&skipApps=false&skipUpdate=false'
+CACHE_DIR = '/var/tmp/check_nextcloud'
+
+
+class CheckError(Exception):
+    def __init__(self, code, message):
+        Exception.__init__(self, message)
+        self.code = code
+
+
+def human_bytes(n):
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB', 'PB'):
+        if abs(n) < 1024 or unit == 'PB':
+            return ('%d %s' if unit == 'B' else '%.1f %s') % (n, unit)
+        n /= 1024.0
+
+
+def human_count(n):
+    return '{:,}'.format(n)
+
+
+def thr(value):
+    return '' if value is None else '%g' % value
+
+
+class Nextcloud(object):
+    def __init__(self, args):
+        scheme = 'http' if args.http else 'https'
+        port = args.port or (80 if args.http else 443)
+        default = (scheme == 'https' and port == 443) or (scheme == 'http' and port == 80)
+        self.base = '%s://%s%s' % (scheme, args.host, '' if default else ':%d' % port)
+        self.timeout = args.timeout
+        self.ctx = ssl.create_default_context()
+        if args.insecure:
+            self.ctx.check_hostname = False
+            self.ctx.verify_mode = ssl.CERT_NONE
+        # Monitoring must reach the server directly, never through a proxy
+        # configured in the poller's environment.
+        self.opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=self.ctx))
+        self.user, self.password = args.user, None
+        self.token = args.nc_token
+        self.args = args
+
+    def credentials(self):
+        a = self.args
+        if a.password:
+            return a.user, a.password
+        if a.auth_file:
+            try:
+                with open(a.auth_file) as f:
+                    line = f.readline().strip()
+            except OSError as e:
+                raise CheckError(UNKNOWN, '%s %s (%s)' % (tr('讀不到認證檔'), a.auth_file, e.strerror))
+            user, sep, password = line.partition(':')
+            if sep and user and password:
+                return user, password
+            if line and a.user:
+                return a.user, line
+        if os.environ.get('NEXTCLOUD_PASSWORD') and a.user:
+            return a.user, os.environ['NEXTCLOUD_PASSWORD']
+        raise CheckError(UNKNOWN, tr('缺少帳號密碼（-u 搭配 -a / --password / NEXTCLOUD_PASSWORD）'))
+
+    def get(self, path, auth=True, token_ok=False):
+        req = urllib.request.Request(self.base + path, headers={
+            'Accept': 'application/json', 'OCS-APIRequest': 'true',
+            'User-Agent': 'check_nextcloud/1.0'})
+        if auth:
+            if token_ok and self.token:
+                req.add_header('NC-Token', self.token)
+            else:
+                user, password = self.credentials()
+                req.add_header('Authorization', 'Basic ' + base64.b64encode(
+                    ('%s:%s' % (user, password)).encode('utf-8')).decode('ascii'))
+        try:
+            with self.opener.open(req, timeout=self.timeout) as r:
+                body = r.read().decode('utf-8', 'replace')
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise CheckError(CRITICAL, 'HTTP %d - %s' % (e.code, tr('帳號或密碼錯誤，或帳號不是管理員')))
+            if e.code == 503:
+                # status.php answers 503 in maintenance mode, with the usual JSON body
+                try:
+                    return json.loads(e.read().decode('utf-8', 'replace'))
+                except ValueError:
+                    pass
+            raise CheckError(CRITICAL, 'HTTP %d %s' % (e.code, self.base + path.split('?')[0]))
+        except (urllib.error.URLError, socket.timeout, OSError) as e:
+            raise CheckError(CRITICAL, '%s %s (%s)' % (tr('無法連線'), self.base, getattr(e, 'reason', e)))
+        try:
+            return json.loads(body)
+        except ValueError:
+            raise CheckError(UNKNOWN, '%s %s' % (self.base + path.split('?')[0], tr('回傳非 JSON')))
+
+    def serverinfo(self):
+        d = self.get(SERVERINFO, token_ok=True)
+        try:
+            meta, data = d['ocs']['meta'], d['ocs']['data']
+        except (KeyError, TypeError):
+            raise CheckError(UNKNOWN, tr('serverinfo API 回應異常'))
+        if meta.get('statuscode') not in (100, 200) or not isinstance(data, dict):
+            raise CheckError(UNKNOWN, '%s: %s %s' % (tr('serverinfo API 回應異常'),
+                                                     meta.get('statuscode'), meta.get('message')))
+        return data
+
+
+# Each check returns (code, summary, detail_lines, perfdata_list).
+# Perfdata labels are fixed and <= 19 alphanumerics: LibreNMS strips other
+# characters, truncates to 19 and locks the RRD's DS set on the first poll.
+
+def check_status(nc, a):
+    s = nc.get('/status.php', auth=False)
+    problems = []
+    code = OK
+    if not s.get('installed'):
+        code, problems = CRITICAL, problems + [tr('未安裝完成')]
+    if s.get('maintenance'):
+        code, problems = CRITICAL, problems + [tr('維護模式中')]
+    if s.get('needsDbUpgrade'):
+        code, problems = CRITICAL, problems + [tr('需要資料庫升級')]
+    summary = '%s %s - %s' % (s.get('productname') or 'Nextcloud', s.get('versionstring') or s.get('version', '?'),
+                              '; '.join(problems) if problems else tr('正常運作'))
+    perf = ['maintenance=%d;;1;0;1' % (1 if s.get('maintenance') else 0)]
+    return code, summary, [], perf
+
+
+def check_updates(nc, a):
+    system = nc.serverinfo().get('nextcloud', {}).get('system', {})
+    apps = system.get('apps') or {}
+    update = system.get('update') or {}
+    code, parts, lines = OK, [], []
+    core = bool(update.get('available')) and not a.ignore_core
+    if core:
+        code = WARNING
+        parts.append(tr('核心可更新到 %s') % update.get('available_version', '?'))
+    n_apps = int(apps.get('num_updates_available') or 0)
+    pending = apps.get('app_updates') or {}
+    if isinstance(pending, list):  # an empty PHP array arrives as []
+        pending = {}
+    ignored = set(x.strip().lower() for x in (a.ignore or '').split(',') if x.strip())
+    pending = dict((k, v) for k, v in pending.items() if k.lower() not in ignored)
+    n_apps = len(pending) if (pending or ignored) else n_apps
+    if n_apps:
+        code = WARNING
+        parts.append(tr('%d 個 app 可更新') % n_apps)
+        lines += ['%s -> %s' % (k, v) for k, v in sorted(pending.items())]
+    if not parts:
+        parts.append(tr('核心與 app 都是最新版'))
+    lines.append(tr('已安裝 %d 個 app') % int(apps.get('num_installed') or 0))
+    summary = 'Nextcloud %s - %s' % (system.get('version', '?'), '; '.join(parts))
+    perf = ['app_updates=%d;1;;0' % n_apps, 'core_update=%d;1;;0;1' % (1 if core else 0)]
+    return code, summary, lines, perf
+
+
+def check_storage(nc, a):
+    nc_data = nc.serverinfo().get('nextcloud', {})
+    system, storage = nc_data.get('system', {}), nc_data.get('storage', {})
+    free = system.get('freespace')
+    code, notes = OK, []
+    if free is None or free is False:
+        free_gb = None
+    else:
+        free_gb = float(free) / GB
+        if a.critical is not None and free_gb <= a.critical:
+            code = CRITICAL
+        elif a.warning is not None and free_gb <= a.warning:
+            code = WARNING
+    users = int(storage.get('num_users') or 0)
+    disabled = int(storage.get('num_disabled_users') or 0)
+    files = int(storage.get('num_files') or 0)
+    summary = (tr('剩餘空間 %s') % (human_bytes(float(free)) if free_gb is not None else '?'))
+    lines = [tr('使用者 %d（停用 %d）· 檔案 %s') % (users, disabled, human_count(files)),
+             'storages %d · appdata %s' % (int(storage.get('num_storages') or 0),
+                                          human_bytes(float(storage.get('size_appdata_storage') or 0)))]
+    perf = ['free=%.2fGB;%s;%s;0' % (free_gb or 0, thr(a.warning), thr(a.critical)),
+            'users=%d;;;0' % users, 'files=%d;;;0' % files,
+            'appdata=%.3fGB;;;0' % (float(storage.get('size_appdata_storage') or 0) / GB)]
+    return code, summary, lines, perf
+
+
+def check_shares(nc, a):
+    sh = nc.serverinfo().get('nextcloud', {}).get('shares', {})
+    g = lambda k: int(sh.get(k) or 0)
+    total, link, nopw = g('num_shares'), g('num_shares_link'), g('num_shares_link_no_password')
+    code = OK
+    notes = []
+    if a.critical is not None and nopw >= a.critical:
+        code = CRITICAL
+        notes.append(tr('無密碼公開連結 %d 個 >= %d') % (nopw, a.critical))
+    elif a.warning is not None and nopw >= a.warning:
+        code = WARNING
+        notes.append(tr('無密碼公開連結 %d 個 >= %d') % (nopw, a.warning))
+    summary = tr('分享 %d · 公開連結 %d（無密碼 %d）') % (total, link, nopw)
+    if notes:
+        summary += ' - ' + '; '.join(notes)
+    lines = [tr('使用者 %d · 其他 %d · 群組 %d · 聊天室 %d · 聯邦 送出 %d／接收 %d') % (
+        g('num_shares_user'), g('num_shares_mail'), g('num_shares_groups'), g('num_shares_room'),
+        g('num_fed_shares_sent'), g('num_fed_shares_received'))]
+    perf = ['shares=%d;;;0' % total, 'links=%d;;;0' % link,
+            'links_nopw=%d;%s;%s;0' % (nopw, thr(a.warning), thr(a.critical)),
+            'user=%d;;;0' % g('num_shares_user'), 'groups=%d;;;0' % g('num_shares_groups'),
+            'room=%d;;;0' % g('num_shares_room'),
+            'fed_sent=%d;;;0' % g('num_fed_shares_sent'),
+            'fed_received=%d;;;0' % g('num_fed_shares_received')]
+    return code, summary, lines, perf
+
+
+def check_users(nc, a):
+    data = nc.serverinfo()
+    au = data.get('activeUsers', {})
+    st = data.get('nextcloud', {}).get('storage', {})
+    g = lambda k: int(au.get(k) or 0)
+    summary = tr('活躍使用者 5 分 %d · 1 小時 %d · 24 小時 %d · 7 天 %d') % (
+        g('last5minutes'), g('last1hour'), g('last24hours'), g('last7days'))
+    lines = [tr('帳號 %d（停用 %d）') % (int(st.get('num_users') or 0), int(st.get('num_disabled_users') or 0))]
+    perf = ['active_5m=%d;;;0' % g('last5minutes'), 'active_1h=%d;;;0' % g('last1hour'),
+            'active_24h=%d;;;0' % g('last24hours'), 'active_7d=%d;;;0' % g('last7days'),
+            'active_30d=%d;;;0' % g('last1month'),
+            'accounts=%d;;;0' % int(st.get('num_users') or 0),
+            'disabled=%d;;;0' % int(st.get('num_disabled_users') or 0)]
+    return OK, summary, lines, perf
+
+
+def check_php(nc, a):
+    php = nc.serverinfo().get('server', {}).get('php', {})
+    oc = php.get('opcache') or {}
+    code, notes = OK, []
+    def raise_to(level, note):
+        notes.append(note)
+        return max(code, level)
+    stats = oc.get('opcache_statistics') or {}
+    mem = oc.get('memory_usage') or {}
+    strings = oc.get('interned_strings_usage') or {}
+    hit = float(stats.get('opcache_hit_rate') or 0)
+    used, free_m, wasted = (float(mem.get(k) or 0) for k in ('used_memory', 'free_memory', 'wasted_memory'))
+    total = used + free_m + wasted
+    used_pct = (used + wasted) / total * 100 if total else 0
+    wasted_pct = float(mem.get('current_wasted_percentage') or 0)
+    s_size = float(strings.get('buffer_size') or 0)
+    s_free = float(strings.get('free_memory') or 0) / s_size * 100 if s_size else 100
+
+    if not oc or not oc.get('opcache_enabled'):
+        code = raise_to(CRITICAL, tr('OPcache 未啟用'))
+    else:
+        if oc.get('cache_full'):
+            code = raise_to(WARNING, tr('OPcache 已滿'))
+        # The hit rate is meaningless right after a restart: wait for traffic.
+        lookups = int(stats.get('hits') or 0) + int(stats.get('misses') or 0)
+        if lookups >= 10000 and hit < a.hit_warn:
+            code = raise_to(WARNING, tr('OPcache 命中率 %.1f%% < %g%%') % (hit, a.hit_warn))
+        if wasted_pct > a.wasted_warn:
+            code = raise_to(WARNING, tr('OPcache 浪費 %.1f%% > %g%%') % (wasted_pct, a.wasted_warn))
+        if s_size and s_free < 5:
+            code = raise_to(WARNING, tr('interned strings 剩 %.1f%%') % s_free)
+
+    apcu = php.get('apcu') or {}
+    sma, cache = apcu.get('sma') or {}, apcu.get('cache') or {}
+    apcu_used = apcu_hit = None
+    seg = float(sma.get('seg_size') or 0) * int(sma.get('num_seg') or 1)
+    if seg:
+        apcu_free = float(sma.get('avail_mem') or 0) / seg * 100
+        apcu_used = 100 - apcu_free
+        if apcu_free < 5:
+            code = raise_to(WARNING, tr('APCu 剩 %.1f%%') % apcu_free)
+        h, m = int(cache.get('num_hits') or 0), int(cache.get('num_misses') or 0)
+        apcu_hit = h * 100.0 / (h + m) if h + m else 0
+
+    summary = 'PHP %s - %s' % (php.get('version', '?'), '; '.join(notes) if notes else
+                               tr('OPcache 命中率 %.2f%% · 使用 %.0f%% · 浪費 %.1f%%') % (hit, used_pct, wasted_pct))
+    lines = []
+    if notes:
+        lines.append(tr('OPcache 命中率 %.2f%% · 使用 %.0f%% · 浪費 %.1f%%') % (hit, used_pct, wasted_pct))
+    if apcu_used is not None:
+        lines.append(tr('APCu 使用 %.0f%% · 命中率 %.1f%%') % (apcu_used, apcu_hit))
+    lines.append('memory_limit %s · upload %s' % (human_bytes(float(php.get('memory_limit') or 0)),
+                                                  human_bytes(float(php.get('upload_max_filesize') or 0))))
+    perf = ['opcache_hit=%.2f%%;%g;;0;100' % (hit, a.hit_warn),
+            'opcache_used=%.1f%%;;;0;100' % used_pct,
+            'opcache_wasted=%.2f%%;%g;;0;100' % (wasted_pct, a.wasted_warn),
+            'strings_used=%.1f%%;95;;0;100' % (100 - s_free),
+            'apcu_used=%.1f%%;95;;0;100' % (apcu_used or 0),
+            'apcu_hit=%.2f%%;;;0;100' % (apcu_hit or 0)]
+    return code, summary, lines, perf
+
+
+def check_system(nc, a):
+    system = nc.serverinfo().get('nextcloud', {}).get('system', {})
+    load = [float(x) for x in (system.get('cpuload') or [0, 0, 0])][:3] + [0, 0, 0]
+    cpus = int(system.get('cpunum') or 1)
+    # serverinfo reports memory in KiB (from /proc/meminfo; mem_free is MemAvailable)
+    total, free = float(system.get('mem_total') or 0) * 1024, float(system.get('mem_free') or 0) * 1024
+    mem_pct = (total - free) / total * 100 if total else 0
+    per_cpu = load[1] / cpus
+    code, notes = OK, []
+    if a.critical is not None and per_cpu >= a.critical:
+        code = CRITICAL
+        notes.append(tr('每顆 CPU 負載 %.2f >= %g') % (per_cpu, a.critical))
+    elif a.warning is not None and per_cpu >= a.warning:
+        code = WARNING
+        notes.append(tr('每顆 CPU 負載 %.2f >= %g') % (per_cpu, a.warning))
+    if total:
+        if mem_pct >= a.mem_crit:
+            code = CRITICAL
+            notes.append(tr('記憶體使用 %.0f%% >= %g%%') % (mem_pct, a.mem_crit))
+        elif mem_pct >= a.mem_warn:
+            code = max(code, WARNING)
+            notes.append(tr('記憶體使用 %.0f%% >= %g%%') % (mem_pct, a.mem_warn))
+    head = tr('負載 %.2f / %.2f / %.2f（%d CPU）') % (load[0], load[1], load[2], cpus)
+    summary = '; '.join(notes) if notes else head
+    lines = [] if not notes else [head]
+    if total:
+        lines.append(tr('記憶體 %s / %s（%.0f%%）') % (human_bytes(total - free), human_bytes(total), mem_pct))
+    perf = ['load1=%.2f;;;0' % load[0], 'load5=%.2f;;;0' % load[1], 'load15=%.2f;;;0' % load[2],
+            'load_per_cpu=%.2f;%s;%s;0' % (per_cpu, thr(a.warning), thr(a.critical)),
+            'mem_used=%.1f%%;%g;%g;0;100' % (mem_pct, a.mem_warn, a.mem_crit)]
+    return code, summary, lines, perf
+
+
+def check_database(nc, a):
+    db = nc.serverinfo().get('server', {}).get('database', {})
+    size = float(db.get('size') or 0)
+    size_gb = size / GB
+    code, note = OK, ''
+    if a.critical is not None and size_gb >= a.critical:
+        code, note = CRITICAL, tr('資料庫大小 %s >= %g GB') % (human_bytes(size), a.critical)
+    elif a.warning is not None and size_gb >= a.warning:
+        code, note = WARNING, tr('資料庫大小 %s >= %g GB') % (human_bytes(size), a.warning)
+    summary = '%s %s · %s' % (db.get('type', '?'), db.get('version', '?'), human_bytes(size))
+    if note:
+        summary += ' - ' + note
+    perf = ['db_size=%.3fGB;%s;%s;0' % (size_gb, thr(a.warning), thr(a.critical))]
+    return code, summary, [], perf
+
+
+def check_setup(nc, a):
+    """The checks behind Administration settings > Overview.
+
+    Running them takes Nextcloud tens of seconds, so the result is cached for
+    --cache minutes; a poll inside that window costs nothing.
+    """
+    key = '%s.setup.json' % urllib.parse.quote(nc.base, safe='')
+    path = os.path.join(CACHE_DIR, key)
+    data, age = None, None
+    try:
+        st = os.stat(path)
+        if time.time() - st.st_mtime < a.cache * 60:
+            with open(path) as f:
+                data = json.load(f)
+            age = int((time.time() - st.st_mtime) / 60)
+    except (OSError, ValueError):
+        data = None
+    if data is None:
+        nc.timeout = max(nc.timeout, 90)
+        data = nc.get('/settings/setupcheck')
+        if not isinstance(data, dict):
+            raise CheckError(UNKNOWN, tr('serverinfo API 回應異常'))
+        try:
+            os.makedirs(CACHE_DIR, mode=0o700, exist_ok=True)
+            tmp = path + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(data, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        except OSError:
+            pass  # caching is an optimisation only
+
+    ignore = [x.strip().lower() for x in (a.ignore or '').split(',') if x.strip()]
+    errors, warnings, ignored, lines = 0, 0, 0, []
+    for category, checks in sorted(data.items()):
+        if not isinstance(checks, dict):
+            continue
+        for cls, c in sorted(checks.items()):
+            sev = (c or {}).get('severity')
+            if sev not in ('error', 'warning'):
+                continue
+            short = cls.split('\\')[-1]
+            name = c.get('name') or short
+            if any(i in short.lower() or i in name.lower() or i in cls.lower() for i in ignore):
+                ignored += 1
+                continue
+            if sev == 'error':
+                errors += 1
+            else:
+                warnings += 1
+            desc = ' '.join(str(c.get('description') or '').split())
+            params = c.get('descriptionParameters') or {}
+            if isinstance(params, dict):
+                for k, v in params.items():
+                    label = v.get('name') if isinstance(v, dict) else v
+                    desc = desc.replace('{%s}' % k, str(label))
+            if len(desc) > 90:
+                desc = desc[:88] + '…'
+            lines.append('')
+            lines.append('[%s] %s (%s)' % (tr('錯誤') if sev == 'error' else tr('警告'), name, short))
+            if desc:
+                lines.append(desc)
+    code = CRITICAL if errors else WARNING if warnings else OK
+    summary = tr('%d 個錯誤、%d 個警告') % (errors, warnings) if code else tr('設定檢查全部通過')
+    if ignored:
+        summary += tr('（已忽略 %d 項）') % ignored
+    if age is not None:
+        summary += tr('（快取 %d 分鐘前）') % age
+    perf = ['errors=%d;;1;0' % errors, 'warnings=%d;1;;0' % warnings]
+    return code, summary, lines, perf
+
+
+CHECKS = {
+    'status': check_status, 'updates': check_updates, 'storage': check_storage,
+    'shares': check_shares, 'users': check_users, 'php': check_php,
+    'system': check_system, 'database': check_database, 'setup': check_setup,
+}
+# Defaults per check for -w / -c, so a bare "-C storage" already alerts.
+DEFAULTS = {'storage': (50, 20), 'system': (2.0, 4.0)}
+
+
+def main():
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument('-H', '--host', required=True)
+    p.add_argument('-C', '--check', required=True, choices=sorted(CHECKS))
+    p.add_argument('-P', '--port', type=int)
+    p.add_argument('--http', action='store_true')
+    p.add_argument('-k', '--insecure', action='store_true')
+    p.add_argument('-u', '--user')
+    p.add_argument('-a', '--auth-file')
+    p.add_argument('--password')
+    p.add_argument('--nc-token')
+    p.add_argument('-t', '--timeout', type=float, default=30.0)
+    p.add_argument('-w', '--warning', type=float)
+    p.add_argument('-c', '--critical', type=float)
+    p.add_argument('--mem-warn', type=float, default=90)
+    p.add_argument('--mem-crit', type=float, default=95)
+    p.add_argument('--hit-warn', type=float, default=95)
+    p.add_argument('--wasted-warn', type=float, default=10)
+    p.add_argument('--ignore')
+    p.add_argument('--ignore-core', action='store_true')
+    p.add_argument('--cache', type=int, default=60)
+    p.add_argument('-l', '--language', choices=['zh-tw', 'en'], default='zh-tw')
+    p.add_argument('-h', '--help', action='help')
+    a = p.parse_args()
+    global LANG
+    LANG = a.language
+    if a.check in DEFAULTS:
+        w, c = DEFAULTS[a.check]
+        a.warning = w if a.warning is None else a.warning
+        a.critical = c if a.critical is None else a.critical
+
+    nc = Nextcloud(a)
+    try:
+        code, summary, lines, perf = CHECKS[a.check](nc, a)
+    except CheckError as e:
+        print('NEXTCLOUD %s - %s' % (STATE[e.code], str(e).replace('|', '/')))
+        return e.code
+
+    # Messages carry text from Nextcloud (versions, app names, setup checks).
+    print('NEXTCLOUD %s - %s' % (STATE[code], summary.replace('|', '/')))
+    for line in lines:
+        print(line.replace('|', '/'))
+    # Perfdata goes LAST: LibreNMS joins all lines and splits on the first "|".
+    print('| ' + ' '.join(perf))
+    return code
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as e:  # never let a traceback reach the monitoring system
+        print('NEXTCLOUD UNKNOWN - %s: %s' % (type(e).__name__, str(e).replace('|', '/')))
+        sys.exit(UNKNOWN)
