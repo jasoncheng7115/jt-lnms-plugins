@@ -1,10 +1,11 @@
 English | [繁體中文](README_zh-TW.md)
 
-# check_jt_waf_mgr v1.2
+# check_jt_waf_mgr v1.3
 
 Checks whether the WAF managed by [jt-waf-mgr](https://github.com/jasoncheng7115/jt-waf-mgr) (nginx + ModSecurity) is working. It only reads `GET /api/v1/health` with an API token whose only scope is `status:read`; it changes nothing.
 
 - WAF paused for troubleshooting (jt-waf-mgr 0.4.82 or later: WARNING while it lasts)
+- nginx and the ModSecurity module: the module loads with the installed nginx, and the next system update would not leave it behind (jt-waf-mgr 0.4.85 or later)
 - nginx master process running, ModSecurity blocking (an engine set to `DetectionOnly` is fine when rules switch blocking on for what they match, from jt-waf-mgr 0.4.83; otherwise WARNING; engine off is CRITICAL)
 - Managed rule files changed outside jt-waf-mgr, the last apply failed, the configuration was changed outside in the last 24 hours
 - Event collector still reading the ModSecurity audit log, IP block list loaded by nginx, program integrity, audit chain, the last two event analyses failed
@@ -40,7 +41,7 @@ sudo editor /etc/librenms/jt-waf-mgr-token
 | `-t` | 10 | Timeout in seconds |
 | `-l` | `zh-tw` | Output language, `zh-tw` or `en` |
 
-Check names: `nginx`, `modsecurity`, `waf_pause`, `managed_rules`, `last_apply`, `collector`, `ip_blocks`, `program_integrity`, `audit_chain`, `config_changes`, `analyst`.
+Check names: `nginx`, `modsecurity`, `nginx_module`, `waf_pause`, `managed_rules`, `last_apply`, `collector`, `ip_blocks`, `program_integrity`, `audit_chain`, `config_changes`, `analyst`.
 
 ## LibreNMS setup
 
@@ -64,6 +65,7 @@ jt-waf-mgr unreachable or an HTTP error is CRITICAL; an unreadable token file, a
 
 ## Changelog
 
+- **v1.3** (2026/11/17): new `nginx_module` check: the ModSecurity module loads with the installed nginx, and the next system update would not leave it behind (jt-waf-mgr 0.4.85 or later)
 - **v1.2** (2026/11/17): new `waf_pause` check (WAF paused for troubleshooting, jt-waf-mgr 0.4.82 or later); ModSecurity reported as blocking through rules when the engine is set to detection only; zh-tw text for the last apply result
 - **v1.0** (2026/11/17)
 

@@ -1,10 +1,11 @@
 [English](README.md) | 繁體中文
 
-# check_jt_waf_mgr v1.2
+# check_jt_waf_mgr v1.3
 
 檢查由 [jt-waf-mgr](https://github.com/jasoncheng7115/jt-waf-mgr) 管理的 WAF（nginx＋ModSecurity）是否正常運作。只用只有 `status:read` 權限的 API 權杖讀 `GET /api/v1/health`，不會改動任何東西。
 
 - WAF 是否暫停中（排查用；jt-waf-mgr 0.4.82 以上，暫停期間是 WARNING）
+- nginx 與 ModSecurity 模組：目前的 nginx 載得起模組，下次系統更新也不會讓模組跟不上（jt-waf-mgr 0.4.85 以上）
 - nginx 主程序是否執行中、ModSecurity 是否會封鎖（引擎設為 `DetectionOnly`、但有規則會對命中的請求切回封鎖時算正常，jt-waf-mgr 0.4.83 起；否則 WARNING；引擎關閉是 CRITICAL）
 - 受管理規則檔是否被外部修改、最近一次套用是否失敗、24 小時內設定是否被外部修改
 - 事件收集是否仍在讀 ModSecurity 稽核記錄、IP 封鎖清單是否被 nginx 載入、程式完整性、稽核鏈、事件分析是否連續兩次失敗
@@ -40,7 +41,7 @@ sudo editor /etc/librenms/jt-waf-mgr-token
 | `-t` | 10 | 逾時秒數 |
 | `-l` | `zh-tw` | 輸出語言，`zh-tw` 或 `en` |
 
-檢查項目名稱：`nginx`、`modsecurity`、`waf_pause`、`managed_rules`、`last_apply`、`collector`、`ip_blocks`、`program_integrity`、`audit_chain`、`config_changes`、`analyst`。
+檢查項目名稱：`nginx`、`modsecurity`、`nginx_module`、`waf_pause`、`managed_rules`、`last_apply`、`collector`、`ip_blocks`、`program_integrity`、`audit_chain`、`config_changes`、`analyst`。
 
 ## LibreNMS 設定
 
@@ -64,6 +65,7 @@ JT-WAF-MGR OK - 運作正常 · jt-waf-mgr 0.4.80
 
 ## 版本紀錄
 
+- **v1.3**（2026/11/17）：新增 `nginx_module` 檢查：目前的 nginx 載得起 ModSecurity 模組，下次系統更新也不會讓模組跟不上（jt-waf-mgr 0.4.85 以上）
 - **v1.2**（2026/11/17）：新增 `waf_pause` 檢查（排查時暫停 WAF，jt-waf-mgr 0.4.82 以上）；引擎設定為只偵測、但由規則封鎖時，ModSecurity 會顯示「由規則封鎖」；最近一次套用的結果改用中文顯示
 - **v1.0**（2026/11/17）
 
