@@ -26,7 +26,7 @@
 | [check_comfyui](check_comfyui/) | v1.1 | LibreNMS 主機 | Python 3 | ComfyUI 狀態、使用的模型、VRAM、排隊數、上一張圖 |
 | [check_pyhs](check_pyhs/) | v1.1 | LibreNMS 主機 | Python 3 | TP-Link Kasa 6 孔智慧延長線各插座用電 |
 | [check_nextcloud](check_nextcloud/) | v1.0 | LibreNMS 主機 | Python 3 | Nextcloud 狀態、更新、剩餘空間、分享、活躍使用者、OPcache／APCu、主機負載、資料庫、設定檢查（取代 check_nextcloud.py） |
-| [check_jt_waf_mgr](check_jt_waf_mgr/) | v1.0 | LibreNMS 主機 | Python 3 | jt-waf-mgr WAF 運作狀態：nginx、ModSecurity 封鎖模式、受管理規則被外部修改、事件收集、IP 封鎖清單、完整性 |
+| [check_jt_waf_mgr](check_jt_waf_mgr/) | v1.2 | LibreNMS 主機 | Python 3 | jt-waf-mgr WAF 運作狀態：nginx、ModSecurity 封鎖模式、WAF 暫停、受管理規則被外部修改、事件收集、IP 封鎖清單、完整性 |
 
 check_graylog_*、check_pmg_queue、check_pve_cephosd、check_udp_nmap、check_diff_webhtml 原本放在 https://github.com/jasoncheng7115/it-scripts/tree/master/nagios_plugons ；同一處的 check_ext_ip 由重新撰寫的 check_extip 取代。
 

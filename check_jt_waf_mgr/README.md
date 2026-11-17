@@ -1,9 +1,10 @@
 English | [繁體中文](README_zh-TW.md)
 
-# check_jt_waf_mgr v1.0
+# check_jt_waf_mgr v1.2
 
 Checks whether the WAF managed by [jt-waf-mgr](https://github.com/jasoncheng7115/jt-waf-mgr) (nginx + ModSecurity) is working. It only reads `GET /api/v1/health` with an API token whose only scope is `status:read`; it changes nothing.
 
+- WAF paused for troubleshooting (jt-waf-mgr 0.4.82 or later: WARNING while it lasts)
 - nginx master process running, ModSecurity in blocking mode (`DetectionOnly` is WARNING, engine off is CRITICAL)
 - Managed rule files changed outside jt-waf-mgr, the last apply failed, the configuration was changed outside in the last 24 hours
 - Event collector still reading the ModSecurity audit log, IP block list loaded by nginx, program integrity, audit chain, the last two event analyses failed
@@ -39,7 +40,7 @@ sudo editor /etc/librenms/jt-waf-mgr-token
 | `-t` | 10 | Timeout in seconds |
 | `-l` | `zh-tw` | Output language, `zh-tw` or `en` |
 
-Check names: `nginx`, `modsecurity`, `managed_rules`, `last_apply`, `collector`, `ip_blocks`, `program_integrity`, `audit_chain`, `config_changes`, `analyst`.
+Check names: `nginx`, `modsecurity`, `waf_pause`, `managed_rules`, `last_apply`, `collector`, `ip_blocks`, `program_integrity`, `audit_chain`, `config_changes`, `analyst`.
 
 ## LibreNMS setup
 
@@ -60,6 +61,11 @@ JT-WAF-MGR OK - 運作正常 · jt-waf-mgr 0.4.80
 ```
 
 jt-waf-mgr unreachable or an HTTP error is CRITICAL; an unreadable token file, a token refused (401/403) or malformed data is UNKNOWN.
+
+## Changelog
+
+- **v1.2** (2026/11/17): new `waf_pause` check (WAF paused for troubleshooting, jt-waf-mgr 0.4.82 or later); ModSecurity reported as blocking through rules when the engine is set to detection only; zh-tw text for the last apply result
+- **v1.0** (2026/11/17)
 
 ## Author
 

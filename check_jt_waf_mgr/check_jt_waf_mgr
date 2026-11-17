@@ -4,7 +4,7 @@
 Read-only: GET /api/v1/health with an API token (scope status:read); changes nothing.
 The overall state is the worst check jt-waf-mgr reports; --ignore leaves named checks out of it.
 Perfdata keys are fixed across language and state.
-Version: 1.0
+Version: 1.2
 Author: Jason Cheng (Jason Tools) <jason@jason.tools>
 https://github.com/jasoncheng7115/jt-lnms-plugins
 """
@@ -24,8 +24,10 @@ TEXT = {
            'ago': '秒前', 'ipblocks': '封鎖中的 IP', 'alerts': '待處理警示', 'pending': '待核准變更', 'none': '無',
            'nginx': 'nginx', 'modsecurity': 'ModSecurity', 'managed_rules': '受管理規則檔', 'last_apply': '最近一次套用',
            'collector': '事件收集', 'ip_blocks': 'IP 封鎖清單', 'program_integrity': '程式完整性', 'audit_chain': '稽核鏈',
-           'config_changes': '設定被外部修改', 'analyst': '事件分析',
+           'config_changes': '設定被外部修改', 'analyst': '事件分析', 'waf_pause': 'WAF 暫停',
+           'm.not paused': '未暫停', 'm.paused on every site (detection only)': '全部站台暫停中 (只偵測)',
            'm.running': '執行中', 'm.not running': '未執行', 'm.blocking': '封鎖模式',
+           'm.blocking through rules (engine set to detection only)': '由規則封鎖 (引擎設定為只偵測)',
            'm.detection only: nothing is blocked': '只偵測，不會封鎖', 'm.engine off': '引擎已關閉',
            'm.no ModSecurity configuration found': '找不到 ModSecurity 設定', 'm.no CRS rules loaded': '沒有載入 CRS 規則',
            'm.managed rule files changed outside jt-waf-mgr': '受管理規則檔被外部修改',
@@ -42,7 +44,7 @@ TEXT = {
         'ago': 's ago', 'ipblocks': 'blocked IPs', 'alerts': 'open alerts', 'pending': 'changes awaiting approval', 'none': 'none',
         'nginx': 'nginx', 'modsecurity': 'ModSecurity', 'managed_rules': 'managed rule files', 'last_apply': 'last apply',
         'collector': 'event collector', 'ip_blocks': 'IP block list', 'program_integrity': 'program integrity', 'audit_chain': 'audit chain',
-        'config_changes': 'outside configuration changes', 'analyst': 'event analysis'},
+        'config_changes': 'outside configuration changes', 'analyst': 'event analysis', 'waf_pause': 'WAF pause'},
 }
 PERF = ('problems', 'events1h', 'blocked1h', 'blocked24h', 'lasteventagesec', 'collectorlagsec', 'ipblocks', 'openalerts',
         'pendingchanges')
@@ -90,7 +92,14 @@ def main():
         return code
 
     def msg(m):
-        return TEXT['zh-tw'].get('m.' + m, m) if a.language == 'zh-tw' else m
+        if a.language != 'zh-tw':
+            return m
+        if m.startswith('paused on ') and m.endswith(' site(s) (detection only)'):
+            return m[len('paused on '):-len(' site(s) (detection only)')] + ' 個站台暫停中 (只偵測)'
+        for en, zh in (('applied', '已套用'), ('apply_failed', '套用失敗'), ('rolled_back', '已回捲')):
+            if m.startswith(en + ' (change #'):
+                return zh + ' (變更 #' + m[len(en + ' (change #'):]
+        return TEXT['zh-tw'].get('m.' + m, m)
 
     try:
         token = Path(a.token_file).read_text().strip()
@@ -100,7 +109,7 @@ def main():
         return emit(3, t['key'])
     name = a.vhost or a.host
     headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/json', 'Host': name,
-               'User-Agent': 'check_jt_waf_mgr/1.0'}
+               'User-Agent': 'check_jt_waf_mgr/1.2'}
     try:
         if a.no_ssl:
             c = http.client.HTTPConnection(a.host, a.port, timeout=a.timeout)
