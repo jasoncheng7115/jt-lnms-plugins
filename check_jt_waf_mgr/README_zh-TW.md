@@ -5,7 +5,7 @@
 檢查由 [jt-waf-mgr](https://github.com/jasoncheng7115/jt-waf-mgr) 管理的 WAF（nginx＋ModSecurity）是否正常運作。只用只有 `status:read` 權限的 API 權杖讀 `GET /api/v1/health`，不會改動任何東西。
 
 - WAF 是否暫停中（排查用；jt-waf-mgr 0.4.82 以上，暫停期間是 WARNING）
-- nginx 主程序是否執行中、ModSecurity 是否為封鎖模式（`DetectionOnly` 是 WARNING，引擎關閉是 CRITICAL）
+- nginx 主程序是否執行中、ModSecurity 是否會封鎖（引擎設為 `DetectionOnly`、但有規則會對命中的請求切回封鎖時算正常，jt-waf-mgr 0.4.83 起；否則 WARNING；引擎關閉是 CRITICAL）
 - 受管理規則檔是否被外部修改、最近一次套用是否失敗、24 小時內設定是否被外部修改
 - 事件收集是否仍在讀 ModSecurity 稽核記錄、IP 封鎖清單是否被 nginx 載入、程式完整性、稽核鏈、事件分析是否連續兩次失敗
 - 最近 1 小時／24 小時的事件與封鎖數、封鎖中的 IP、待處理警示、待核准變更輸出成效能資料

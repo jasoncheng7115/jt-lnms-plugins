@@ -5,7 +5,7 @@ English | [繁體中文](README_zh-TW.md)
 Checks whether the WAF managed by [jt-waf-mgr](https://github.com/jasoncheng7115/jt-waf-mgr) (nginx + ModSecurity) is working. It only reads `GET /api/v1/health` with an API token whose only scope is `status:read`; it changes nothing.
 
 - WAF paused for troubleshooting (jt-waf-mgr 0.4.82 or later: WARNING while it lasts)
-- nginx master process running, ModSecurity in blocking mode (`DetectionOnly` is WARNING, engine off is CRITICAL)
+- nginx master process running, ModSecurity blocking (an engine set to `DetectionOnly` is fine when rules switch blocking on for what they match, from jt-waf-mgr 0.4.83; otherwise WARNING; engine off is CRITICAL)
 - Managed rule files changed outside jt-waf-mgr, the last apply failed, the configuration was changed outside in the last 24 hours
 - Event collector still reading the ModSecurity audit log, IP block list loaded by nginx, program integrity, audit chain, the last two event analyses failed
 - Events and blocks in the last hour / 24 hours, active IP blocks, open alerts and changes awaiting approval as perfdata
