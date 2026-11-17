@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""LibreNMS/Nagios check of jt-waf-mgr (nginx + ModSecurity WAF manager). -l zh-tw|en; default zh-tw.
+Read-only: GET /api/v1/health with an API token (scope status:read); changes nothing.
+The overall state is the worst check jt-waf-mgr reports; --ignore leaves named checks out of it.
+Perfdata keys are fixed across language and state.
+Version: 1.0
+Author: Jason Cheng (Jason Tools) <jason@jason.tools>
+https://github.com/jasoncheng7115/jt-lnms-plugins
+"""
+import argparse
+import http.client
+import json
+import math
+import socket
+import ssl
+import sys
+from pathlib import Path
+
+TEXT = {
+ 'zh-tw': {'ok': '運作正常', 'down': '無法連線到 jt-waf-mgr', 'http': 'API HTTP 錯誤', 'auth': 'API 權杖無效或來源不被允許',
+           'invalid': 'API 資料格式不正確', 'key': '無法讀取 API 權杖檔', 'ignored': '(略過)',
+           'events1h': '最近 1 小時事件', 'blocked1h': '封鎖', 'blocked24h': '最近 24 小時封鎖', 'lastevent': '最後一筆事件',
+           'ago': '秒前', 'ipblocks': '封鎖中的 IP', 'alerts': '待處理警示', 'pending': '待核准變更', 'none': '無',
+           'nginx': 'nginx', 'modsecurity': 'ModSecurity', 'managed_rules': '受管理規則檔', 'last_apply': '最近一次套用',
+           'collector': '事件收集', 'ip_blocks': 'IP 封鎖清單', 'program_integrity': '程式完整性', 'audit_chain': '稽核鏈',
+           'config_changes': '設定被外部修改', 'analyst': '事件分析',
+           'm.running': '執行中', 'm.not running': '未執行', 'm.blocking': '封鎖模式',
+           'm.detection only: nothing is blocked': '只偵測，不會封鎖', 'm.engine off': '引擎已關閉',
+           'm.no ModSecurity configuration found': '找不到 ModSecurity 設定', 'm.no CRS rules loaded': '沒有載入 CRS 規則',
+           'm.managed rule files changed outside jt-waf-mgr': '受管理規則檔被外部修改',
+           'm.as last applied': '與最近套用的版本相同', 'm.not adopted (read-only mode)': '尚未納管 (唯讀模式)',
+           'm.reading': '正常讀取', 'm.not reading the audit log': '沒有在讀稽核記錄', 'm.loaded': '已載入',
+           'm.not enabled': '未啟用', 'm.the list file is not included in nginx': 'nginx 沒有載入清單檔',
+           'm.the last write of the list failed': '上次寫入清單失敗', 'm.the list file differs from the active blocks': '清單檔與封鎖中的 IP 不一致',
+           'm.ok': '正常', 'm.broken': '鏈已中斷', 'm.failed': '失敗', 'm.not checked yet': '尚未檢查',
+           'm.no outside change in 24 hours': '24 小時內沒有', 'm.nginx or ModSecurity configuration changed outside jt-waf-mgr': '24 小時內 nginx 或 ModSecurity 設定被外部修改',
+           'm.the last two runs failed': '最近兩次都失敗', 'm.nothing applied yet': '尚未套用過', 'm.pid file not readable': '讀不到 pid 檔'},
+ 'en': {'ok': 'working', 'down': 'cannot reach jt-waf-mgr', 'http': 'API HTTP error', 'auth': 'API token invalid or source not allowed',
+        'invalid': 'invalid API data', 'key': 'cannot read the API token file', 'ignored': '(ignored)',
+        'events1h': 'events in the last hour', 'blocked1h': 'blocked', 'blocked24h': 'blocked in 24 hours', 'lastevent': 'last event',
+        'ago': 's ago', 'ipblocks': 'blocked IPs', 'alerts': 'open alerts', 'pending': 'changes awaiting approval', 'none': 'none',
+        'nginx': 'nginx', 'modsecurity': 'ModSecurity', 'managed_rules': 'managed rule files', 'last_apply': 'last apply',
+        'collector': 'event collector', 'ip_blocks': 'IP block list', 'program_integrity': 'program integrity', 'audit_chain': 'audit chain',
+        'config_changes': 'outside configuration changes', 'analyst': 'event analysis'},
+}
+PERF = ('problems', 'events1h', 'blocked1h', 'blocked24h', 'lasteventagesec', 'collectorlagsec', 'ipblocks', 'openalerts',
+        'pendingchanges')
+STATE = {'ok': 0, 'warning': 1, 'critical': 2}
+
+
+def number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+class _HTTPS(http.client.HTTPSConnection):
+    """Connects to the given address but sends --vhost as the TLS server name (SNI)."""
+    def __init__(self, host, port, sni, **kw):
+        super().__init__(host, port, **kw)
+        self._sni = sni
+
+    def connect(self):
+        sock = socket.create_connection((self.host, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self._sni)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('-H', '--host', required=True, help='jt-waf-mgr host or address (LibreNMS adds it)')
+    p.add_argument('-p', '--port', type=int, default=443)
+    p.add_argument('--vhost', help='the management site name (Host header and TLS SNI), e.g. waf.example.com')
+    p.add_argument('--no-ssl', action='store_true', help='plain http (e.g. straight to 127.0.0.1:8095)')
+    p.add_argument('-k', '--insecure', action='store_true', help='do not verify the TLS certificate')
+    p.add_argument('--ca-file', help='CA bundle for a private CA')
+    p.add_argument('--token-file', required=True, help='file with the API token (scope status:read)')
+    p.add_argument('--ignore', default='', help='comma-separated check names left out of the overall state')
+    p.add_argument('-t', '--timeout', type=float, default=10)
+    p.add_argument('-l', '--language', choices=['zh-tw', 'en'], default='zh-tw')
+    a = p.parse_args()
+    t = TEXT[a.language]
+    colon = '：' if a.language == 'zh-tw' else ': '
+    perf = dict.fromkeys(PERF)
+    lines = []
+
+    def emit(code, summary):
+        print('JT-WAF-MGR ' + {0: 'OK', 1: 'WARNING', 2: 'CRITICAL', 3: 'UNKNOWN'}[code] + ' - ' + summary.replace('|', '/'))
+        for line in lines:
+            print(str(line).replace('|', '/').replace('\r', ' '))
+        print('| ' + ' '.join(k + '=' + ('%d' % perf[k] if number(perf[k]) else 'U') + ';;;0' for k in PERF))
+        return code
+
+    def msg(m):
+        return TEXT['zh-tw'].get('m.' + m, m) if a.language == 'zh-tw' else m
+
+    try:
+        token = Path(a.token_file).read_text().strip()
+        if not token or '\n' in token:
+            raise ValueError()
+    except (OSError, ValueError):
+        return emit(3, t['key'])
+    name = a.vhost or a.host
+    headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/json', 'Host': name,
+               'User-Agent': 'check_jt_waf_mgr/1.0'}
+    try:
+        if a.no_ssl:
+            c = http.client.HTTPConnection(a.host, a.port, timeout=a.timeout)
+        else:
+            ctx = ssl.create_default_context(cafile=a.ca_file) if a.ca_file else ssl.create_default_context()
+            if a.insecure:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            c = _HTTPS(a.host, a.port, name, timeout=a.timeout, context=ctx)
+        c.request('GET', '/api/v1/health', headers=headers)
+        r = c.getresponse()
+        raw = r.read(1024 * 1024 + 1)
+        c.close()
+    except (OSError, ssl.SSLError, http.client.HTTPException) as e:
+        lines.append(type(e).__name__)
+        return emit(2, t['down'])
+    if r.status in (401, 403):
+        return emit(3, t['auth'] + ' (' + str(r.status) + ')')
+    if r.status != 200:
+        return emit(2, t['http'] + ' ' + str(r.status))
+    try:
+        if len(raw) > 1024 * 1024:
+            raise ValueError()
+        d = json.loads(raw)
+        checks = d['checks']
+        if not isinstance(checks, list) or not all(isinstance(x, dict) and x.get('status') in STATE for x in checks):
+            raise ValueError()
+        mx = d.get('metrics') or {}
+    except (ValueError, KeyError, TypeError):
+        return emit(3, t['invalid'])
+    ignore = {x.strip() for x in a.ignore.split(',') if x.strip()}
+    counted = [x for x in checks if x.get('name') not in ignore]
+    code = max((STATE[x['status']] for x in counted), default=0)
+    bad = [x for x in counted if x['status'] != 'ok']
+    bad.sort(key=lambda x: -STATE[x['status']])
+    coll = next((x for x in checks if x.get('name') == 'collector'), {})
+    perf.update(problems=len(bad), events1h=mx.get('events_1h'), blocked1h=mx.get('blocked_1h'),
+                blocked24h=mx.get('blocked_24h'), lasteventagesec=mx.get('last_event_age_seconds'),
+                collectorlagsec=coll.get('lag_seconds'), ipblocks=mx.get('ip_blocks_active'),
+                openalerts=mx.get('open_alerts'), pendingchanges=mx.get('pending_changes'))
+    ver = str(d.get('version') or '?')[:20]
+    if bad:
+        summary = ' · '.join(t.get(x.get('name'), str(x.get('name'))) + colon + msg(str(x.get('message') or x['status']))
+                             for x in bad[:3])
+    else:
+        summary = t['ok'] + ' · jt-waf-mgr ' + ver
+    lines.append('')
+    for x in checks:
+        mark = {'ok': 'OK', 'warning': 'WARN', 'critical': 'CRIT'}[x['status']]
+        lines.append('[' + mark + '] ' + t.get(x.get('name'), str(x.get('name'))) + colon + msg(str(x.get('message') or ''))
+                     + (' ' + t['ignored'] if x.get('name') in ignore else ''))
+
+    def fmt(v):
+        return '%d' % v if number(v) else t['none']
+    lines.extend(['', t['events1h'] + colon + fmt(mx.get('events_1h')) + ' · ' + t['blocked1h'] + colon + fmt(mx.get('blocked_1h'))
+                  + ' · ' + t['blocked24h'] + colon + fmt(mx.get('blocked_24h')),
+                  t['lastevent'] + colon + (fmt(mx.get('last_event_age_seconds')) + ' ' + t['ago']
+                                           if number(mx.get('last_event_age_seconds')) else t['none']),
+                  t['ipblocks'] + colon + fmt(mx.get('ip_blocks_active')) + ' · ' + t['alerts'] + colon + fmt(mx.get('open_alerts'))
+                  + ' · ' + t['pending'] + colon + fmt(mx.get('pending_changes')),
+                  '', 'jt-waf-mgr ' + ver + ' · ' + str(d.get('node_id') or '?')[:40]])
+    return emit(code, summary)
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as e:   # noqa: BLE001
+        print('JT-WAF-MGR UNKNOWN - ' + type(e).__name__)
+        sys.exit(3)
